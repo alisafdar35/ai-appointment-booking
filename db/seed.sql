@@ -61,8 +61,8 @@ ON CONFLICT (id) DO NOTHING;
 -- ---------------------------------------------------------------------------
 -- Every seeded time is a wall-clock time in the business's own timezone.
 --
--- Times are derived from now() so the data is always current whenever a
--- reviewer runs this, but now() is an instant: date_trunc('day', now()) would
+-- Times are derived from now() so the data is always current whenever the
+-- seed runs, but now() is an instant: date_trunc('day', now()) would
 -- cut it at midnight in the *session's* timezone, so "14:00" would mean 14:00
 -- in Karachi on a laptop and 14:00 UTC on Neon — 5 AM or 10 AM in New York,
 -- outside the opening hours the API enforces. Converting to the business zone
@@ -82,7 +82,7 @@ $$;
 -- ---------------------------------------------------------------------------
 -- A completed AI conversation that produced a real booking.
 -- Seeded so the chat UI, transcript and booking provenance are all visible on
--- first load instead of requiring the reviewer to generate data first.
+-- first load instead of requiring anyone to generate data first.
 --
 -- The conversation, its draft and appointment ffff...0001 below all describe
 -- the same slot, three days out at 14:00, so the day the transcript names is
@@ -105,12 +105,14 @@ ON CONFLICT (id) DO NOTHING;
 -- Messages have no natural key to conflict on, so the transcript is guarded as
 -- a unit: inserted only while the seeded session has no messages at all. Without
 -- this, every re-run would append a second copy of the conversation.
--- `meta` is what each assistant turn told the UI to show (see migration 004).
+-- `meta` is what each assistant turn told the UI to show (chat_messages.meta).
 INSERT INTO chat_messages (session_id, role, content, engine, tool_calls, meta, created_at)
 SELECT 'eeeeeeee-0000-0000-0000-000000000001', m.role::chat_message_role, m.content, m.engine, m.tool_calls, m.meta::jsonb, m.created_at
 FROM (SELECT to_char(pg_temp.seed_local_day(3), 'YYYY-MM-DD') AS iso,
              to_char(pg_temp.seed_local_day(3), 'FMDay, FMMonth FMDD, YYYY') AS long_date,
-             lower(to_char(pg_temp.seed_local_day(3), 'FMDay')) AS weekday) d
+             lower(to_char(pg_temp.seed_local_day(3), 'FMDay')) AS weekday,
+             jsonb_build_object('serviceName', 'Teeth Whitening', 'date', to_char(pg_temp.seed_local_day(3), 'YYYY-MM-DD'),
+                                'time', '14:00', 'notes', 'Prefers afternoon') AS draft) d
 CROSS JOIN LATERAL (VALUES
   ('user',
    'hi, i want to get my teeth whitened in the next few days', NULL, NULL::jsonb, NULL,
@@ -120,7 +122,8 @@ CROSS JOIN LATERAL (VALUES
    'mistral',
    jsonb_build_array(jsonb_build_object('name', 'respond_to_booking_request', 'intent', 'collecting',
      'arguments', jsonb_build_object('serviceName', 'Teeth Whitening'))),
-   '{"action":"collect_info","missing":["date","time"]}',
+   jsonb_build_object('action', 'collect_info', 'missing', jsonb_build_array('date', 'time'),
+     'draft', jsonb_build_object('serviceName', 'Teeth Whitening', 'date', NULL, 'time', NULL, 'notes', NULL))::text,
    now() - interval '2 days 5 minutes'),
   ('user',
    d.weekday || ' at 2pm if you have it, i prefer afternoons', NULL, NULL::jsonb, NULL,
@@ -130,7 +133,7 @@ CROSS JOIN LATERAL (VALUES
    'mistral',
    jsonb_build_array(jsonb_build_object('name', 'respond_to_booking_request', 'intent', 'collecting',
      'arguments', jsonb_build_object('date', d.iso, 'time', '14:00', 'notes', 'Prefers afternoon'))),
-   '{"action":"confirm","missing":[]}',
+   jsonb_build_object('action', 'confirm', 'missing', '[]'::jsonb, 'draft', d.draft)::text,
    now() - interval '2 days 3 minutes'),
   ('user',
    'yes please', NULL, NULL::jsonb, NULL,
@@ -142,7 +145,8 @@ CROSS JOIN LATERAL (VALUES
    'fallback',
    jsonb_build_array(jsonb_build_object('name', 'respond_to_booking_request', 'intent', 'confirming',
      'arguments', '{}'::jsonb)),
-   '{"action":"booked","missing":[]}',
+   jsonb_build_object('action', 'booked', 'missing', '[]'::jsonb, 'draft', d.draft,
+     'appointmentId', 'ffffffff-0000-0000-0000-000000000001')::text,
    now() - interval '2 days 1 minute')
 ) AS m(role, content, engine, tool_calls, meta, created_at)
 WHERE NOT EXISTS (
@@ -152,7 +156,7 @@ WHERE NOT EXISTS (
 -- ---------------------------------------------------------------------------
 -- Appointments, all inside Bluewave's 09:00-17:00 in its own timezone (see
 -- seed_local_day above). The customer's live bookings do not overlap each
--- other, which appointments_customer_no_overlap (migration 005) requires.
+-- other, which appointments_customer_no_overlap requires.
 -- ---------------------------------------------------------------------------
 INSERT INTO appointments
   (id, business_id, user_id, service_id, starts_at, ends_at, status, source, notes, chat_session_id)

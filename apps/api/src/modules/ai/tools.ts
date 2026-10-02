@@ -3,29 +3,12 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import { bookingSlotsSchema } from '@appt/shared';
 
 /**
- * The LLM contract.
- *
- * ---------------------------------------------------------------------------
- * Why one forced tool call instead of free-text parsing
- * ---------------------------------------------------------------------------
- * Asking a model for prose and then regex-ing dates out of it is fragile.
- * Instead the model is given exactly one function and told it must call it, so
- * every turn comes back as structured arguments we can validate. The function
- * carries BOTH the extracted slots and the sentence to show the user, which
- * keeps it to a single round trip — a separate "now write a reply" call would
- * double latency and cost for no benefit.
- *
- * ---------------------------------------------------------------------------
- * Why the schema is generated
- * ---------------------------------------------------------------------------
- * `assistantToolSchema` extends `bookingSlotsSchema` from @appt/shared — the
- * same schema the booking form and the API validate against. The JSON Schema
- * sent to Mistral is produced from it by zodToJsonSchema, and the model's reply
- * is parsed back through it. A hand-written second copy of this shape would
- * drift from the real one the first time a field changed; here it cannot,
- * because there is only one.
+ * The LLM contract: one forced tool call per turn carrying both the slots and
+ * the reply, so every answer is structured and validated in one round trip.
+ * The JSON Schema is generated from the shared bookingSlotsSchema, so the
+ * model's contract cannot drift from what the form and API validate.
  */
-export const ASSISTANT_INTENTS = ['collecting', 'confirming', 'cancelling', 'other'] as const;
+export const ASSISTANT_INTENTS = ['collecting', 'confirming', 'cancelling', 'other', 'off_topic'] as const;
 
 export const assistantToolSchema = bookingSlotsSchema.partial().extend({
   reply: z
@@ -38,7 +21,7 @@ export const assistantToolSchema = bookingSlotsSchema.partial().extend({
   intent: z
     .enum(ASSISTANT_INTENTS)
     .describe(
-      "'collecting' while details are still missing; 'confirming' when the user is agreeing to a proposed booking; 'cancelling' if they want to cancel; 'other' for anything unrelated to booking.",
+      "'collecting' while details are still missing; 'confirming' when the user is agreeing to a proposed booking; 'cancelling' if they want to cancel; 'other' for a question about this business; 'off_topic' for anything unrelated to it (not answered).",
     ),
 });
 export type AssistantToolArgs = z.infer<typeof assistantToolSchema>;

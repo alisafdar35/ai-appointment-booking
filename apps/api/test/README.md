@@ -14,7 +14,7 @@ creates the test databases on first use.
 
 | Folder | What | Needs a database |
 | --- | --- | --- |
-| `unit/` | Date/time helpers, the deterministic fallback extractor, tool-call validation, model-answer guardrails, prompt content, the shared schemas and `mergeSlots` | no |
+| `unit/` | Date/time helpers, the message readers (`parse.ts`), the deterministic fallback provider, tool-call validation, model-answer guardrails, prompt content, conversation titles, the shared schemas and `mergeSlots` | no |
 | `integration/` | The real Express app over real HTTP (and Socket.IO), against a freshly migrated and seeded Postgres | yes |
 
 Integration files are split by concern, not by endpoint: `auth`, `appointments`,

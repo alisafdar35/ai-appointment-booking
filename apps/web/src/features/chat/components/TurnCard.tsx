@@ -1,5 +1,5 @@
 import { RotateCw } from 'lucide-react';
-import { isBookingComplete, type AppointmentDto, type ServiceDto } from '@appt/shared';
+import type { AppointmentDto, ServiceDto } from '@appt/shared';
 import { Button } from '@/components/ui/Button';
 import type { ChatItem, TurnMeta } from '../lib/reducer';
 import { BookedCard } from './BookedCard';
@@ -52,9 +52,7 @@ export function TurnCard({ view, services, timeZone, actions }: TurnCardProps) {
         />
       );
 
-    case 'booked': {
-      // Nothing to show only for a legacy booking whose draft was never complete.
-      if (!meta.appointment && !isBookingComplete(meta.bookingDraft)) return null;
+    case 'booked':
       return (
         <BookedCard
           appointment={meta.appointment}
@@ -64,7 +62,6 @@ export function TurnCard({ view, services, timeZone, actions }: TurnCardProps) {
           onAddToCalendar={actions.onAddToCalendar}
         />
       );
-    }
 
     case 'error':
       return live ? (

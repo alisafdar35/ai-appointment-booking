@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { SEED } from '../helpers/fixtures.js';
-import { buildSystemPrompt, openDaysPhrase } from '../../src/modules/ai/prompts.js';
+import { openDaysPhrase } from '../../src/modules/ai/copy.js';
+import { buildSystemPrompt } from '../../src/modules/ai/prompts.js';
 import { ASSISTANT_TOOL_NAME, buildAssistantTool, parseAssistantArgs } from '../../src/modules/ai/tools.js';
 
 /**

@@ -26,24 +26,6 @@ export const VIEW_FILTERS: Record<AppointmentView, AppointmentFilters> = {
   cancelled: { status: statusFilter(['cancelled']), limit: LIST_LIMIT },
 };
 
-export interface AppointmentSummary {
-  upcomingCount: number;
-  /** The soonest upcoming appointment, if any. */
-  next: AppointmentDto | null;
-  cancelledCount: number;
-}
-
-export function summarize(
-  upcoming: readonly AppointmentDto[],
-  cancelled: readonly AppointmentDto[],
-): AppointmentSummary {
-  return {
-    upcomingCount: upcoming.length,
-    next: upcoming[0] ?? null,
-    cancelledCount: cancelled.length,
-  };
-}
-
 /** Only an active booking that has not started yet can be cancelled. */
 export function canCancel(appointment: AppointmentDto, now: Date): boolean {
   return ACTIVE_STATUSES.includes(appointment.status) && new Date(appointment.startsAt) > now;

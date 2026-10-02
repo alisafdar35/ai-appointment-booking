@@ -98,6 +98,22 @@ test.describe('booking by conversation', () => {
     await expect(bookedCard(page)).toContainText(`${picked} – `);
   });
 
+  test('asks one question at a time, and its chips answer it: the dates first, then real free times', async ({ page }) => {
+    await signUpCustomer(page);
+    await page.goto('/assistant');
+    await send(page, 'Routine checkup please');
+
+    await send(page, 'can i come in on 03/04 at 5?');
+    const chips = page.getByRole('group', { name: 'Suggested replies' }).getByRole('button');
+    await expect(chips).toHaveText([/Mar 4/, /Apr 3/]);
+
+    await clickAndAwaitTurn(page, chips.nth(1));
+    await expect(chips).toHaveCount(4);
+    const picked = (await chips.first().textContent())!.trim();
+    await clickAndAwaitTurn(page, chips.first());
+    await expect(latestSummary(page)).toContainText(picked);
+  });
+
   test('keeps the conversation and its live summary across a reload and a switch of conversation', async ({ page }) => {
     const api = await signUpCustomer(page);
     const slot = await findOpenSlot(api, 'Orthodontic Review');

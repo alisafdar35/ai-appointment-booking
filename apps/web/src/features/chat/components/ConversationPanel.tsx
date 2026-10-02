@@ -61,10 +61,10 @@ export function ConversationPanel({
   const formRef = useRef<HTMLDivElement>(null);
 
   // ---- what is live: only the newest assistant message can be acted on -----
-  const turnContext: TurnContext = { turns: chat.turns, draft, status: sessionStatus, appointments: chat.appointments };
+  const turnContext: TurnContext = { turns: chat.turns, appointments: chat.appointments };
   const liveKey = liveItemKey(items);
   const liveItem = liveKey ? items[items.length - 1] : undefined;
-  const liveMeta = liveItem ? turnMetaFor(liveItem, true, turnContext) : null;
+  const liveMeta = liveItem ? turnMetaFor(liveItem, turnContext) : null;
   const completed = sessionStatus === 'completed';
 
   // ---- the structured form: opened by the user, or offered by a needs_form turn

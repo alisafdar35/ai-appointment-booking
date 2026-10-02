@@ -11,7 +11,7 @@ import { useBusinessTimezone, useCurrentUser } from '@/providers/AuthProvider';
 import { AppointmentList } from './AppointmentList';
 import { BOOKING_DRAFT_NAME, BookingDialog } from './BookingDialog';
 import { CancelDialog } from './CancelDialog';
-import { SummaryTiles } from './SummaryTiles';
+import { NextAppointmentSummary } from './NextAppointmentSummary';
 import { useAppointmentViews } from './hooks/useAppointmentViews';
 import { useChangeHighlights } from './hooks/useChangeHighlights';
 import { useNow } from './hooks/useNow';
@@ -33,7 +33,7 @@ function isAppointmentView(value: string): value is AppointmentView {
  * (book, cancel).
  *
  * All three views are fetched up front. They are small, indexed queries, and
- * it buys instant tab switches, a count on every tab and the summary tiles
+ * it buys instant tab switches, a count on every tab and the next appointment
  * from the same data, with no extra "stats" endpoint. The realtime provider
  * and the mutations keep every one of those caches current, and nothing here
  * waits on the socket: without it the list still refreshes on focus and after
@@ -61,7 +61,7 @@ export function AppointmentsDashboard() {
   const [cancelTarget, setCancelTarget] = useState<AppointmentDto | null>(null);
   const panelsRef = useRef<HTMLDivElement>(null);
 
-  const { queries, items, summary, summaryFailed } = useAppointmentViews();
+  const { queries, items, next, nextFailed } = useAppointmentViews();
   const { highlightedIds, highlight } = useChangeHighlights(items[view], view);
 
   const onBooked = (appointment: AppointmentDto) => {
@@ -96,7 +96,7 @@ export function AppointmentsDashboard() {
         }
       />
 
-      <SummaryTiles summary={summary} failed={summaryFailed} timezone={timezone} now={now} showCustomer={showCustomer} />
+      <NextAppointmentSummary next={next} failed={nextFailed} timezone={timezone} now={now} showCustomer={showCustomer} />
 
       <div ref={panelsRef}>
         <Tabs value={view} onValueChange={(next) => isAppointmentView(next) && setView(next)}>

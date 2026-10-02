@@ -1,4 +1,4 @@
-import type { AppointmentDto, CreateAppointmentInput, ListAppointmentsInput } from '@appt/shared';
+import type { AppointmentDto, BookingSuggestion, CreateAppointmentInput, ListAppointmentsInput } from '@appt/shared';
 import { withTransaction, type Queryable } from '../../db/pool.js';
 import { logger } from '../../lib/logger.js';
 import {
@@ -19,21 +19,14 @@ import {
 } from '../../lib/errors.js';
 import { humanTime, shortDate } from '../../lib/time.js';
 import * as repo from './repository.js';
-import { checkSlot, suggestAlternatives, type SlotCheck } from './availability.js';
+import { checkSlot, getAvailability, suggestAlternatives, type SlotCheck } from './availability.js';
 import * as idempotency from './idempotency.js';
 
 /**
- * Booking business logic.
- *
- * This is the ONLY way an appointment gets created, whichever surface the
- * request came from. The structured form calls it; the chatbot calls it with
- * `source: 'chat'` after the AI layer has produced slots. The AI code never
- * writes to the database and never re-implements a rule — it extracts
- * information, and this service decides whether a booking is allowed.
- *
- * That boundary is deliberate. If the LLM could book directly, every rule here
- * (business hours, past times, double-booking, tenant scope) would depend on a
- * model following instructions. Here they depend on code and a constraint.
+ * Booking business logic: the ONLY way an appointment is created, from any
+ * surface. The AI layer never writes or re-implements a rule, so hours, past
+ * times, double-booking and tenant scope depend on code and constraints, not
+ * on a model following instructions.
  */
 
 export interface BookingContext {
@@ -97,6 +90,26 @@ async function alternativesTo(
     // Same day as asked: the time alone is clear. Another day names the day.
     label: a.date === requested.date ? humanTime(a.time) : `${shortDate(a.date)}, ${humanTime(a.time)}`,
   }));
+}
+
+/**
+ * The first free start times on one day, earliest first, optionally only those
+ * starting inside `window` ([from, to) as HH:MM). Same query as the
+ * availability endpoint, so a time offered here is one the booking accepts.
+ */
+export async function freeTimes(
+  ctx: BookingContext,
+  serviceId: string,
+  date: string,
+  options: { window?: readonly [from: string, to: string]; limit?: number } = {},
+): Promise<BookingSuggestion[]> {
+  const availability = await getAvailability(ctx.businessId, serviceId, date, ctx.userId);
+  if (!availability || availability.closed) return [];
+  const [from, to] = options.window ?? ['00:00', '24:00'];
+  return availability.slots
+    .filter((slot) => slot.available && slot.time >= from && slot.time < to)
+    .slice(0, options.limit ?? 4)
+    .map((slot) => ({ date, time: slot.time, label: humanTime(slot.time) }));
 }
 
 interface CheckOptions {
@@ -214,7 +227,7 @@ export async function attemptBooking(
  * and the form route never used it). The session row is locked for the whole
  * check-and-insert: a second booking for the same conversation — a chat "yes"
  * racing the form, a double submit — waits here, then finds it completed.
- * The unique index from migration 009 backs this up.
+ * The partial unique index appointments_one_live_per_chat_session backs this up.
  */
 async function bookInSession(
   ctx: BookingContext,

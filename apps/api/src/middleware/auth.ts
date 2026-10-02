@@ -13,7 +13,7 @@ export const REFRESH_COOKIE = 'appt_refresh';
  * through its own origin, the cookie is first-party, which keeps it out of
  * reach of JavaScript (XSS) without relying on third-party cookie support.
  * The header exists so the API is directly usable with curl, Postman or any
- * non-browser client — including a reviewer exercising it by hand.
+ * non-browser client — including a developer exercising it by hand.
  */
 function extractToken(req: Parameters<RequestHandler>[0]): string | null {
   const header = req.header('authorization');

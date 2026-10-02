@@ -7,6 +7,7 @@ import type {
   ChatMessageRole,
   ChatSessionDto,
   ChatSessionStatus,
+  ClarificationDto,
   RequiredSlot,
 } from '@appt/shared';
 import { EMPTY_SLOTS } from '@appt/shared';
@@ -26,8 +27,7 @@ const toSessionDto = (row: SessionRow): ChatSessionDto => ({
   id: row.id,
   title: row.title,
   status: row.status,
-  // The column is jsonb with a '{}' default, so a session created before a
-  // field existed still produces a complete draft object here.
+  // A new session's draft is the column default '{}': fill in the empty slots.
   bookingDraft: { ...EMPTY_SLOTS, ...(row.booking_draft ?? {}) },
   messageCount: row.message_count,
   lastMessageAt: row.last_message_at,
@@ -92,14 +92,14 @@ export async function createSession(
  * offered after a clash. Keeping the turn's outcome on the message is what lets
  * a reloaded transcript render the same controls the live one did, each from
  * its own draft and booking. `missing` is kept for debugging and replay; the
- * client derives it from the draft. Rows written before `draft` and
- * `appointmentId` were recorded simply lack them.
+ * client derives it from the draft.
  */
 export interface MessageMeta {
   action: AssistantAction;
   suggestions?: BookingSuggestion[];
+  clarification?: ClarificationDto;
   missing: RequiredSlot[];
-  draft?: BookingSlots;
+  draft: BookingSlots;
   appointmentId?: string;
 }
 
@@ -119,7 +119,8 @@ const toMessageDto = (row: MessageRow): ChatMessageDto => ({
   engine: row.engine,
   action: row.meta?.action ?? null,
   ...(row.meta?.suggestions?.length ? { suggestions: row.meta.suggestions } : {}),
-  ...(row.meta?.draft ? { draft: { ...EMPTY_SLOTS, ...row.meta.draft } } : {}),
+  ...(row.meta?.clarification ? { clarification: row.meta.clarification } : {}),
+  ...(row.meta ? { draft: row.meta.draft } : {}),
   ...(row.meta?.appointmentId ? { appointmentId: row.meta.appointmentId } : {}),
   createdAt: row.created_at,
 });

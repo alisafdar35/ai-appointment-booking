@@ -17,7 +17,7 @@ apps/web/src
     chat/        components/ (ChatWorkspace, ConversationPanel, MessageList, TurnCard, ConfirmationCard,
                  BookedCard, FallbackFormCard, SideRail, SessionList, Composer, ...)
                  hooks/useChat.ts   lib/reducer.ts, turn-meta.ts, cache.ts, failure.ts, ics.ts, ...
-    appointments/  AppointmentsDashboard, AppointmentList/Card, BookingDialog, CancelDialog, SummaryTiles,
+    appointments/  AppointmentsDashboard, NextAppointmentSummary, AppointmentList/Card, BookingDialog, CancelDialog,
                    hooks/useAppointmentViews, useChangeHighlights
     booking/     SlotPicker, DateField (shared by the dialog and the in-chat form)
     auth/        LoginForm, SignupForm, signup-schema, error-map, redirect
@@ -46,8 +46,9 @@ apps/web/src
 **Chat reconciliation details** ([`useChat.ts`](../apps/web/src/features/chat/hooks/useChat.ts)):
 - A sent message appears immediately with a local key. The server returns `userMessage.id`, and the bubble is matched **by id**, keeping its React key, so two identical "yes" messages never cross-match.
 - The reducer is keyed by session, so a reply arriving after you switch conversations lands in the right one.
-- On reload, every assistant message is rebuilt from what was stored with it (`turnMetaFor` in `turn-meta.ts`): its `action`, `suggestions` and `draft` snapshot restore each confirmation card (earlier ones disabled, only the latest live), the suggestion chips and the form offer; a `booked` message's `appointmentId` picks its row from the transcript's `appointments`, so the receipt does not depend on the rail's capped upcoming list. Without the row (cancelled since) the receipt falls back to the message's draft and claims no status. Older rows without a `draft` get a card only when they are the latest message (from the session's draft); rows without an `action` fall back to inference from the draft.
+- On reload, every assistant message is rebuilt from what was stored with it (`turnMetaFor` in `turn-meta.ts`): its `action`, `suggestions`, `clarification` and `draft` snapshot restore each confirmation card (earlier ones disabled, only the latest live), the chips and the form offer; a `booked` message's `appointmentId` picks its row from the transcript's `appointments`, so the receipt does not depend on the rail's capped upcoming list. Without the row (cancelled since) the receipt falls back to the message's draft and claims no status. Every assistant message carries its `draft`; there is no legacy inference path.
 - A server-confirmed appointment update (cancellation from the dashboard, a socket event) is folded into the cached transcript of the conversation that booked it. Once that transcript is refetched, a cancelled booking is no longer among its `appointments` (the API lists only bookings still going ahead), so the receipt falls back to "Booked in this conversation" with no status and points to the dashboard: it never shows a stale "Confirmed". Rescheduling is not implemented; cancel and book again.
+- **Chips only answer the question asked:** the two readings of a clarifying question (`clarification`), or the server's real free times (`suggestions`). The client never invents times (`chips.ts`).
 - `assistant:turn` from another tab is merged into the transcript cache. `assistant:typing` shows dots in the open conversation, with a 15 s timeout if the turn never arrives.
 - On first load the latest *unfinished* conversation is resumed; otherwise a new one starts. This decision is made once, so a refetch never moves the user.
 
@@ -66,7 +67,7 @@ apps/web/src
 
 ## Async and error UX patterns
 
-- **Loading:** skeletons shaped like the content (app shell, summary tiles, lists), not spinners over blank pages. The Send button visibly holds until the conversation is ready.
+- **Loading:** skeletons shaped like the content (app shell, the next-appointment card, lists), not spinners over blank pages. The Send button visibly holds until the conversation is ready.
 - **Chat failures stay in the transcript** next to the message, with a cause-specific action: rate limited shows a countdown from `Retry-After`; network offers **Retry**; `SESSION_CLOSED` marks the conversation completed, switches the composer to "Start a new conversation", and offers **Send in a new conversation**, which carries the text over.
 - **No duplicate actions:** the dialog's Book button goes busy the moment it is pressed (react-hook-form's `isSubmitting`, before validation finishes) and a ref blocks a second submit, so a double click sends one request; a chat confirmation card stops being actionable as soon as the user's "Yes, book it" is on screen. Both are proven by request-counting e2e tests with a slowed API.
 - **Offline:** TanStack Query pauses a chat send while the browser reports it is offline; the message stays in the transcript, a notice explains the wait, and it goes out on reconnect. A request that drops mid-flight fails with a **Retry**.
@@ -74,7 +75,7 @@ apps/web/src
 - **Booking conflicts:** a 409 in the dialog keeps the form, says the slot was taken, and refreshes the slot picker. In chat, the assistant offers suggestion chips (one tap resends as a message).
 - **Cancelling something already cancelled or completed** (`APPOINTMENT_NOT_CANCELLABLE`) closes the dialog with "Already taken care of" and refetches.
 - **Field errors from the server** (`details`) are mapped onto form fields (`lib/form-errors.ts`), so client and server messages appear in the same place.
-- **Failed list loads** show an "Unavailable" state on tiles and a retryable error in lists, rather than shimmering forever.
+- **Failed list loads** show a retryable error in lists, and the next-appointment card shows "Unavailable" instead of loading, rather than shimmering forever.
 - **Toasts** only confirm actions that happened elsewhere on screen, such as "Appointment cancelled".
 - **Route-level** `error.tsx` and `not-found.tsx` handle the rest.
 
@@ -86,7 +87,7 @@ apps/web/src
 
 | Form | Schema |
 |---|---|
-| Sign up | `signupSchema.pick(...)` plus a form-only `mode` (create vs join) that decides which business field is required ([`signup-schema.ts`](../apps/web/src/features/auth/signup-schema.ts)). The password checklist shows the same rules as `passwordSchema`; the 72-byte rule is listed only once exceeded |
+| Sign up | `signupSchema.pick(...)` plus a form-only `mode` (join, the default, or create) that decides which business field is required ([`signup-schema.ts`](../apps/web/src/features/auth/signup-schema.ts)). The password checklist shows the same rules as `passwordSchema`; the 72-byte rule is listed only once exceeded |
 | Sign in | `loginSchema` |
 | Booking dialog | `createAppointmentSchema.extend(...)` with a "today or later" rule in the business timezone |
 | In-chat fallback form | `bookingSlotsSchema` fields, pre-filled from the draft |
@@ -109,7 +110,8 @@ Because rules come from `@appt/shared`, the form cannot accept what the API reje
 The layout was checked at 1440×900, 1024×768 and 390×844, in light and dark mode.
 
 - **Assistant:** three columns on desktop (conversations, transcript, draft rail). On phones the conversation list and draft rail collapse, and a sticky summary bar shows the draft ("Booked · …" after booking).
-- **Appointments:** the summary tiles go to two rows and the tabs go full-width on phones. Cards wrap without dangling separators.
+- **Appointments:** a "Next appointment" card sits above the tabs (counts live on the tabs only, not repeated in tiles); the tabs go full-width on phones, and cards wrap without dangling separators.
+- **Dialogs:** the header and content scroll while the footer actions stay in view, so a long booking form on a phone never hides its Book button.
 - **200% zoom:** an e2e spec runs the dashboard, the booking dialog and the assistant at 640×360 CSS px (a 1280×720 window at 200%) and checks nothing overflows horizontally.
 - **Times** always show in the business timezone, with the zone abbreviation on confirmation (e.g. "2:00 PM EDT"). An e2e spec books from a browser in Asia/Karachi and reads it from one in America/Los_Angeles: identical labels, matching the saved instant. A day the business does not open (`AvailabilityDto.closed`) is shown as "Closed on this day".
 
@@ -119,5 +121,4 @@ Set in [`next.config.mjs`](../apps/web/next.config.mjs): `X-Frame-Options: DENY`
 
 ## Tests
 
-- **Vitest + Testing Library** (461 tests): reducer, turn-meta rebuild, cache upserts, failure mapping, ICS generation, retry policy, API client refresh and superseded handling, `useChat` (optimistic flow, socket echo, typing, `SESSION_CLOSED`), ConversationPanel, dialogs, forms and tabs.
-- **Playwright** ([`e2e/`](../apps/web/e2e)): conversational booking with a mid-flow correction, taken slot leading to a suggestion and a booking, form fallback, appointments dialog and cancel, realtime across two tabs, resilience (injected 500, network failure, 429 with Retry-After), signup create/join, and route guard redirect; plus `session.spec.ts` (sign-out leaves no cookie, socket or readable page; invalid and expired sessions; the booking kept across re-login), `reliability.spec.ts` (double clicks with a slow API, a lost response retried with the same idempotency key, reload right after booking, offline and dropped sends, socket down, assistant down, two tabs, a reply landing after a conversation switch), `safety.spec.ts` (markup in names, messages and notes stays text; length limits; no internals in error messages), `display.spec.ts` (browser timezones, only your own bookings, cancellation consistency) and `accessibility.spec.ts` (keyboard only, 200% zoom). Each runs on desktop and Pixel 7 projects, except `accessibility.spec.ts`, which is desktop-only; `E2E_ALL_BROWSERS=1` adds Firefox and WebKit. `npm run e2e` ([scripts/e2e.mjs](../scripts/e2e.mjs)) runs them against a stack of their own: a freshly recreated and seeded `appt_e2e` database, the API on :4100 without a Mistral key, and the production web build on :3100. Each worker books only on its own days (`laneDays` in [e2e/support/api.ts](../apps/web/e2e/support/api.ts)), so parallel tests never compete for a slot, and CI runs the same command.
+Vitest + Testing Library unit and component tests sit next to the code; Playwright specs are in [`e2e/`](../apps/web/e2e) and run against an isolated stack with `npm run e2e`. What they cover, how the stack is built, and the counts are in [testing.md](testing.md).

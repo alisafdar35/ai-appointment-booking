@@ -65,21 +65,23 @@ describe('SignupForm', () => {
     expect(screen.getByRole('status')).toHaveTextContent('All password requirements met');
   });
 
-  it('asks for the business field that matches the chosen mode', async () => {
+  it('starts on joining an existing business with an empty code, and asks for the field that matches the mode', async () => {
     const userEvents = userEvent.setup();
     renderForm();
 
-    expect(screen.getByLabelText(/^Business name/)).toBeInTheDocument();
-    await userEvents.click(screen.getByRole('radio', { name: 'Join an existing business' }));
+    expect(screen.getByRole('radio', { name: 'Join an existing business' })).toBeChecked();
+    expect(screen.getByLabelText(/^Business code/)).toHaveValue('');
+    await userEvents.click(screen.getByRole('radio', { name: 'Create a new business' }));
 
-    expect(screen.queryByLabelText(/^Business name/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText(/^Business code/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Business code/)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/^Business name/)).toBeInTheDocument();
   });
 
   it('blocks submission and flags the missing business name', async () => {
     const userEvents = userEvent.setup();
     renderForm();
     await fillAccount(userEvents);
+    await userEvents.click(screen.getByRole('radio', { name: 'Create a new business' }));
 
     await userEvents.click(submit());
 
@@ -93,6 +95,7 @@ describe('SignupForm', () => {
     const userEvents = userEvent.setup();
     renderForm();
     await fillAccount(userEvents);
+    await userEvents.click(screen.getByRole('radio', { name: 'Create a new business' }));
     await userEvents.type(screen.getByLabelText(/^Business name/), 'Casey Dental');
 
     await userEvents.click(submit());
@@ -134,6 +137,7 @@ describe('SignupForm', () => {
     const userEvents = userEvent.setup();
     renderForm();
     await fillAccount(userEvents);
+    await userEvents.click(screen.getByRole('radio', { name: 'Create a new business' }));
     await userEvents.type(screen.getByLabelText(/^Business name/), 'Casey Dental');
 
     await userEvents.click(submit());
@@ -147,6 +151,7 @@ describe('SignupForm', () => {
     const userEvents = userEvent.setup();
     renderForm();
     await fillAccount(userEvents);
+    await userEvents.click(screen.getByRole('radio', { name: 'Create a new business' }));
     await userEvents.type(screen.getByLabelText(/^Business name/), 'Casey Dental');
 
     await userEvents.click(submit());

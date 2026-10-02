@@ -173,26 +173,12 @@ describe('only the latest actionable card is interactive', () => {
     expect(within(latest!).getByRole('button', { name: 'Confirm booking' })).toBeEnabled();
   });
 
-  it('shows no card for an earlier summary stored before drafts were recorded', () => {
-    renderPanel(
-      controller({
-        items: [item('1', 'user'), item('2', 'assistant', { action: 'confirm' }), item('3', 'user'), item('4', 'assistant', { action: 'collect_info' })],
-        draft: COMPLETE_DRAFT,
-      }),
-    );
-    expect(screen.queryByRole('region', { name: 'Booking summary' })).not.toBeInTheDocument();
-  });
-
   it('restores the live summary after a reload from the action recorded on the message', () => {
     renderPanel(
-      controller({ items: [item('1', 'user'), item('2', 'assistant', { action: 'confirm' })], draft: COMPLETE_DRAFT }),
-    );
-    expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeEnabled();
-  });
-
-  it('infers the summary for a message stored before actions were recorded', () => {
-    renderPanel(
-      controller({ items: [item('1', 'user'), item('2', 'assistant', { action: null })], draft: COMPLETE_DRAFT }),
+      controller({
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'confirm', draft: COMPLETE_DRAFT })],
+        draft: COMPLETE_DRAFT,
+      }),
     );
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeEnabled();
   });
@@ -202,7 +188,7 @@ describe('after a reload, from what the transcript recorded', () => {
   it('offers the form again when the last reply did', async () => {
     renderPanel(
       controller({
-        items: [item('1', 'user'), item('2', 'assistant', { action: 'needs_form' })],
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'needs_form', draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' } })],
         draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' },
       }),
     );
@@ -217,6 +203,7 @@ describe('after a reload, from what the transcript recorded', () => {
         item('1', 'user'),
         item('2', 'assistant', {
           action: 'collect_info',
+          draft: { serviceName: 'Routine Checkup', date: '2026-10-05', time: null, notes: null },
           suggestions: [{ date: '2026-10-05', time: '15:30', label: '3:30 PM' }],
         }),
       ],
@@ -290,12 +277,12 @@ describe('booked turn', () => {
     expect(within(card).getByText('2:00 PM EDT')).toBeInTheDocument();
   });
 
-  it('after a reload, without the appointment loaded, still shows what was booked from the session draft', () => {
-    // The booking can be past, or beyond the upcoming list the page loads; the
-    // receipt must not vanish, but it cannot vouch for a status it does not know.
+  it('after a reload, with the appointment cancelled since, still shows what was booked from the reply’s draft', () => {
+    // A cancelled booking is no longer in the transcript's bookings: the receipt
+    // must not vanish, but it cannot vouch for a status it does not know.
     renderPanel(
       controller({
-        items: [item('1', 'user'), item('2', 'assistant', { action: 'booked' })],
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'booked', draft: COMPLETE_DRAFT, appointmentId: 'gone' })],
         draft: COMPLETE_DRAFT,
         sessionStatus: 'completed',
       }),

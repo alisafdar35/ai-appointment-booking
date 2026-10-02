@@ -89,12 +89,19 @@ export function UserMenu() {
           <div className="flex items-start gap-3">
             <Avatar name={user.fullName} size="lg" />
             <div className="min-w-0 space-y-1">
-              <p className="truncate text-sm font-semibold text-foreground">{user.fullName}</p>
-              <p className="truncate text-sm text-muted-foreground">{user.email}</p>
+              {/* Truncated to fit the panel: the title shows the whole value on hover. */}
+              <p className="truncate text-sm font-semibold text-foreground" title={user.fullName}>
+                {user.fullName}
+              </p>
+              <p className="truncate text-sm text-muted-foreground" title={user.email}>
+                {user.email}
+              </p>
               <Badge tone={role.tone}>{role.label}</Badge>
             </div>
           </div>
-          <p className="mt-3 truncate text-sm text-muted-foreground">{user.businessName}</p>
+          <p className="mt-3 truncate text-sm text-muted-foreground" title={user.businessName}>
+            {user.businessName}
+          </p>
           <div className="mt-4 border-t border-border pt-4">
             <Button
               variant="secondary"

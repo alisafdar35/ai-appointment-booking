@@ -7,13 +7,13 @@ import { pinToday } from '../helpers/clock.js';
 import { SEED, addDays, freshDate, futureDate, pastDate } from '../helpers/fixtures.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient, ApiResponse } from '../helpers/apiClient.js';
-import { shortDate } from '../../src/lib/time.js';
+import { humanDate, shortDate } from '../../src/lib/time.js';
 
 type Transcript = ChatTranscriptDto;
 
 /**
  * End-to-end conversations on the deterministic engine (no MISTRAL_API_KEY),
- * which is the engine every reviewer without a key will actually meet.
+ * which is the engine every deployment without a key actually runs.
  *
  * Dates are written into messages as ISO dates ("on 2031-04-22 at 10am") where
  * a test needs a specific slot: relative dates ("next monday") are kept to the
@@ -410,7 +410,7 @@ describe('chat', () => {
       assert.match(t.message.content, /Which service would you like, and what day and time suit you\? We offer: /);
     });
 
-    it('asks AM or PM for "At 5." rather than guess, and reopens a time already on screen', async () => {
+    it('answers "At 5." (neither reading bookable) with the hours and real free times, reopening the time on screen', async () => {
       const date = freshDate();
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
       assert.equal(t1.action, 'confirm');
@@ -418,7 +418,9 @@ describe('chat', () => {
       const t2 = await turn(customer, 'At 5.', t1.sessionId);
       assert.equal(t2.action, 'collect_info');
       assert.equal(t2.bookingDraft.time, null);
-      assert.match(t2.message.content, /Did you mean 5:00 AM or 5:00 PM\? We're open 9:00 AM to 5:00 PM/);
+      assert.match(t2.message.content, /We take bookings from 9:00 AM to 5:00 PM\. What time in those hours suits you\?$/);
+      assert.equal(t2.clarification, undefined, 'no AM/PM question: neither reading can be booked');
+      assert.deepEqual(t2.suggestions?.map((s) => s.time), ['09:00', '09:30', '10:00', '10:30']);
 
       const t3 = await turn(customer, 'yes', t1.sessionId);
       assert.notEqual(t3.action, 'booked', 'the 10:00 the user moved away from cannot be agreed to');
@@ -427,6 +429,43 @@ describe('chat', () => {
       const t4 = await turn(customer, '3pm', t1.sessionId);
       assert.equal(t4.action, 'confirm');
       assert.equal(t4.bookingDraft.time, '15:00');
+    });
+
+    it('asks one question for "can i come in on 03/04 at 5?", offers the two dates, then real times once one is picked', async () => {
+      const t1 = await turn(customer, 'routine checkup please');
+      const t2 = await turn(customer, 'can i come in on 03/04 at 5?', t1.sessionId);
+      assert.equal(t2.action, 'collect_info');
+      assert.deepEqual([t2.bookingDraft.date, t2.bookingDraft.time], [null, null]);
+      assert.equal((t2.message.content.match(/\?/g) ?? []).length, 1, t2.message.content);
+      assert.equal(t2.clarification?.field, 'date');
+      assert.deepEqual(t2.clarification?.options.map((d) => d.slice(5)), ['03-04', '04-03']);
+      assert.equal(t2.suggestions, undefined, 'the chips answer the question asked');
+
+      // A chip sends the date in words; the next question is the time, with free times to pick.
+      const picked = t2.clarification!.options[1]!;
+      const t3 = await turn(customer, `${humanDate(picked)}`, t1.sessionId);
+      assert.equal(t3.bookingDraft.date, picked);
+      assert.match(t3.message.content, /What time works for you\?/);
+      assert.equal(t3.suggestions?.length, 4);
+      assert.ok(t3.suggestions!.every((s) => s.date === picked));
+
+      // Reloaded, the question still carries its answers.
+      const { body } = await customer.get<ChatTranscriptDto>(`/api/chat/sessions/${t1.sessionId}`);
+      const asked = body.messages.find((m) => m.id === t2.message.id)!;
+      assert.deepEqual(asked.clarification, t2.clarification);
+    });
+
+    it('offers the first free times on the chosen day when only the time is missing, skipping taken ones', async () => {
+      const date = freshDate();
+      await book(staff, { date, time: '09:00' });
+      const t = await turn(customer, `routine checkup on ${date}`);
+      assert.equal(t.action, 'collect_info');
+      assert.deepEqual(t.missing, ['time']);
+      assert.deepEqual(
+        t.suggestions?.map(({ date: d, time }) => [d, time]),
+        [[date, '09:30'], [date, '10:00'], [date, '10:30'], [date, '11:00']],
+      );
+      assert.equal(t.suggestions?.[0]?.label, '9:30 AM');
     });
 
     it('asks which date "03/04" means rather than guess', async () => {
@@ -692,7 +731,7 @@ describe('chat', () => {
       assert.deepEqual(res.body.missing, []);
       assert.match(res.body.message.content, /^Booked — Teeth Whitening/);
       const a = res.body.appointment!;
-      assert.equal(a.source, 'chat');
+      assert.equal(a.source, 'form', 'typed into the form, so badged as a form booking');
       assert.equal(a.chatSessionId, session.id);
       assert.equal(a.notes, 'Prefers morning');
       assert.equal(a.startsAt, instant(date, '11:00'));
@@ -1010,7 +1049,7 @@ describe('chat', () => {
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
       const t2 = await turn(customer, 'yes', t1.sessionId);
       const other = await book(staff, { date: freshDate(), time: '15:00' });
-      // Finished, as a live one could not share the conversation (migration 009).
+      // Finished, as a live one could not share the conversation (appointments_one_live_per_chat_session).
       await app.db.query(`UPDATE appointments SET chat_session_id = $1, status = 'completed' WHERE id = $2`, [
         t1.sessionId,
         other.body.appointment.id,

@@ -41,7 +41,7 @@ export function SignupForm() {
       email: '',
       password: '',
       phone: '',
-      mode: 'create',
+      mode: 'join',
       businessName: '',
       businessSlug: '',
     },

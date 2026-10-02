@@ -18,7 +18,7 @@ flowchart TB
     auth["modules/auth"]
     appt["modules/appointments<br/>service · availability · repository"]
     chat["modules/chat<br/>orchestration · repository · title"]
-    ai["modules/ai<br/>index (orchestrator) · mistral · fallback · guardrails · tools · prompts · logs"]
+    ai["modules/ai<br/>index (orchestrator) · mistral · fallback · parse · guardrails · copy · tools · prompts · logs"]
     rt["realtime/<br/>Socket.IO gateway"]
   end
 
@@ -123,7 +123,7 @@ sequenceDiagram
 
 - **Model:** a shared schema. `businesses` is the tenant root, and every tenant-scoped row carries `business_id`.
 - **Scope comes from the token.** `business_id` is a JWT claim (`bid`), and repositories put it in every `WHERE`. Request bodies never carry it.
-- **The database enforces it.** Child tables reference parents through **composite foreign keys** `(business_id, id)`, so an appointment cannot point at a user, service or conversation from another tenant even if application code got it wrong. Migration 003 closed the last single-column reference (`appointments.chat_session_id`).
+- **The database enforces it.** Child tables reference parents through **composite foreign keys** `(business_id, id)`, so an appointment cannot point at a user, service or conversation from another tenant even if application code got it wrong.
 - **Per-user scoping is in the query, not a separate check.** Chat sessions are filtered by `business_id AND user_id`. Customers' appointment queries add `user_id`. Another user's resource returns 404, not 403, so ids do not leak existence.
 - **Tenant-specific AI context.** The prompt and the tool's `serviceName` enum are built from the tenant's own live catalogue and hours.
 - **Not done:** Postgres Row Level Security as a second net, and per-tenant rate limits or quotas.

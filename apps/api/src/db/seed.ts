@@ -1,4 +1,4 @@
-/** Applies db/seed.sql. Kept as SQL so it is a reviewable deliverable in its own right. */
+/** Applies db/seed.sql. Kept as plain SQL so it also runs with psql alone. */
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

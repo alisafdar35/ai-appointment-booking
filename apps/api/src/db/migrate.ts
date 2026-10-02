@@ -1,9 +1,8 @@
 /**
  * Minimal forward-only migration runner.
  *
- * Deliberately not a migration framework: the requirement is plain SQL DDL that
- * a reviewer can read, and a dependency that rewrites the schema from a DSL
- * would hide exactly the work being assessed. What a runner must get right is:
+ * Deliberately not a migration framework: the schema is plain SQL DDL anyone
+ * can read, not generated from a DSL. What a runner must get right is:
  *   - apply each file at most once (schema_migrations ledger)
  *   - apply in deterministic order (filenames are zero-padded and sorted)
  *   - run each file in a transaction, so a failure leaves no partial schema

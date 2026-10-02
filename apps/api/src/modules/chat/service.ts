@@ -2,10 +2,13 @@ import {
   isBookingComplete,
   mergeSlots,
   missingSlots,
+  type AppointmentDto,
   type AssistantAction,
   type AssistantTurnDto,
   type BookingSlots,
+  type BookingSuggestion,
   type ChatSessionDto,
+  type ClarificationDto,
   type ChatTranscriptDto,
   type RequiredSlot,
   type SendMessageInput,
@@ -17,28 +20,29 @@ import { logger } from '../../lib/logger.js';
 import { badRequest, notFound, sessionClosed } from '../../lib/errors.js';
 import { humanDate, humanTime, nowTimeInZone, shortDate, todayInZone } from '../../lib/time.js';
 import { DEFAULT_SESSION_TITLE, titleFromMessage } from './title.js';
-import { confirmationPrompt, generateAssistantTurn, heldPrompt, negates } from '../ai/index.js';
+import {
+  confirmationPrompt,
+  generateAssistantTurn,
+  heldPrompt,
+  negates,
+  PART_OF_DAY_WINDOW,
+  statedPartOfDay,
+  type ProviderInput,
+  type ProviderOutput,
+} from '../ai/index.js';
 import * as appointments from '../appointments/service.js';
 import * as repo from './repository.js';
 
 /**
- * ===========================================================================
  * Conversation orchestration.
  *
- * This is the layer the assessment is really about, so the division of labour
- * is worth stating plainly:
+ *   The AI           — reads what the user wrote; returns slots and a sentence.
+ *   This layer       — owns the state machine: resolves slots to real records,
+ *                      decides what happens next, persists it.
+ *   The booking layer — enforces the rules and writes the row.
  *
- *   The AI's job      — read what the user wrote, return slots and a sentence.
- *   This layer's job  — own the state machine, resolve slots to real records,
- *                       decide what happens next, and persist it.
- *   The booking layer — enforce the rules and write the row.
- *
- * The model is an input, not a decision maker. It cannot book, cannot see
- * another tenant's data, and cannot choose what the UI renders. Everything it
- * produces is validated against a schema and then resolved against the
- * database before it is acted on. That is what makes an unreliable component
- * safe to depend on.
- * ===========================================================================
+ * The model is an input, not a decision maker: it cannot book, see another
+ * tenant's data, or choose what the UI renders.
  */
 
 /**
@@ -103,18 +107,11 @@ export async function handleUserMessage(
 }
 
 /**
- * One turn at a time per conversation, in arrival order.
- *
- * A turn reads the stored draft, waits seconds on the model, then writes a new
- * draft. Two overlapping turns would both start from the same draft and the
- * later write would silently undo the earlier one ("whitening" then "at 3pm"
- * sent quickly would lose the service), and a second "yes" would race the
- * first to the booking call. Queued here, each turn starts from the state the
- * previous one left: the second "yes" finds the conversation closed.
- *
- * The queue lives in this process. A second API instance would need a lock in
- * the database; until then the exclusion constraints still guarantee one
- * booking per slot, and the closed-session check refuses a late "yes".
+ * One turn at a time per conversation, in arrival order. Overlapping turns
+ * would both start from the same draft and the later write would undo the
+ * earlier ("whitening" then "at 3pm" lost the service), and two "yes"es would
+ * race to book. The queue is per process; across instances the session row
+ * lock and the EXCLUDE constraints still hold.
  */
 const sessionQueues = new Map<string, Promise<unknown>>();
 
@@ -130,8 +127,20 @@ async function inSessionOrder<T>(sessionId: string, work: () => Promise<T>): Pro
   }
 }
 
+type TurnCtx = { businessId: string; userId: string; requestId: string };
+
+/** What a turn decided: the reply, the UI action and the draft to store. */
+interface Decision {
+  action: AssistantAction;
+  replyText: string;
+  draft: BookingSlots;
+  appointment?: AppointmentDto;
+  suggestions?: BookingSuggestion[];
+  clarification?: ClarificationDto;
+}
+
 async function handleTurn(
-  ctx: { businessId: string; userId: string; requestId: string },
+  ctx: TurnCtx,
   input: SendMessageInput,
   hooks: { onGenerating?: (sessionId: string) => void },
 ): Promise<AssistantTurnDto> {
@@ -141,44 +150,17 @@ async function handleTurn(
   ]);
   if (!business) throw notFound('Business');
 
-  // ---- 1. Resolve or create the session -----------------------------------
-  let session: ChatSessionDto;
-  if (input.sessionId) {
-    const existing = await repo.findSession(ctx.businessId, ctx.userId, input.sessionId);
-    if (!existing) throw notFound('Conversation');
-    assertOpen(existing);
-    session = existing;
-  } else {
-    session = await withTransaction((client) =>
-      // The first message becomes the title, so the sidebar is readable
-      // without generating a summary (another model call we do not need).
-      repo.createSession(client, {
-        businessId: ctx.businessId,
-        userId: ctx.userId,
-        title: titleFromMessage(input.content),
-      }),
-    );
-  }
+  // 1. Resolve the session and store the user's message before anything slow.
+  const session = await openSession(ctx, input);
+  const userMessage = await recordUserMessage(session, input.content);
 
-  // ---- 2. Persist the user's message before calling anything slow ---------
-  // Written first so the message is not lost if the provider call fails or the
-  // request is abandoned. The transcript is the user's, not the model's.
-  // A session opened empty (POST /chat/sessions, or the form) is titled by the
-  // first message typed into it, exactly as one created by that message is.
-  const untitled = session.title === DEFAULT_SESSION_TITLE;
-  const userMessage = await withTransaction(async (client) => {
-    if (untitled) await repo.updateSessionTitle(client, session.id, titleFromMessage(input.content));
-    return repo.appendMessage(client, { sessionId: session.id, role: 'user', content: input.content });
-  });
-
-  // ---- 3. Assemble context ------------------------------------------------
+  // 2. Ask the assistant, with the stored draft re-stated as context.
   const [history, services, outcomes] = await Promise.all([
     repo.recentTurns(session.id, env.AI_HISTORY_TURNS),
     appointments.listServices(ctx.businessId),
     repo.recentOutcomes(session.id, STALLED_TURN_THRESHOLD - 1),
   ]);
-
-  const providerInput = {
+  const providerInput: ProviderInput = {
     businessName: business.name,
     timezone: business.timezone,
     opensAt: business.opensAt,
@@ -192,161 +174,31 @@ async function handleTurn(
     history,
     requestId: ctx.requestId,
   };
-
-  // ---- 4. Ask the assistant ----------------------------------------------
   hooks.onGenerating?.(session.id);
-  const turn = await generateAssistantTurn(providerInput, {
-    businessId: ctx.businessId,
-    sessionId: session.id,
-  });
+  const turn = await generateAssistantTurn(providerInput, { businessId: ctx.businessId, sessionId: session.id });
 
-  // ---- 5. Merge the extracted slots over the stored draft ------------------
-  // mergeSlots treats an absent field as "not mentioned this turn", not as
-  // "cleared" — see @appt/shared. Without that, "actually make it 3pm" would
-  // wipe the service the user already picked.
-  let draft = mergeSlots(session.bookingDraft, turn.slots);
-  // A field the message reopened without settling ("at 5": AM or PM?) is
-  // unknown again, so the summary still on screen for the old value cannot be
-  // agreed to while the reply asks which one was meant.
-  for (const field of turn.clarify ?? []) draft = { ...draft, [field]: null };
+  // 3. Merge the (already guard-checked) slots and resolve the service.
+  const { draft, resolution } = await mergeTurn(ctx.businessId, session.bookingDraft, turn, services);
 
-  // ---- 6. Resolve the service NAME to a real catalogue row ----------------
-  // The model returns a name; only the database can turn that into an id, and
-  // only for this tenant. An unresolvable or ambiguous name is handled here
-  // rather than being carried into the booking call.
-  const resolution = await resolveService(ctx.businessId, draft.serviceName, services);
-  if (resolution.kind === 'unknown' && draft.serviceName) {
-    draft = { ...draft, serviceName: null };
-  } else if (resolution.kind === 'resolved') {
-    // Store the catalogue's own name, not the model's near-miss ("whitening"),
-    // so the draft, the confirmation and the booking all say the same thing.
-    draft = { ...draft, serviceName: resolution.service.name };
-  }
+  // 4. Decide what happens next, then offer the form if the chat is stalling.
+  const decision = offerFormIfStalled(
+    await decideAction({ ctx, session, turn, draft, resolution, services, history, content: input.content }),
+    outcomes,
+  );
 
-  let action: AssistantAction = 'collect_info';
-  let replyText = turn.reply;
-  let appointment: AssistantTurnDto['appointment'];
-  let suggestions: AssistantTurnDto['suggestions'];
-
-  if (resolution.kind === 'ambiguous') {
-    // Several catalogue entries matched. Asking is correct; guessing is not.
-    action = 'collect_info';
-    replyText = `Did you mean ${resolution.options.map((o) => o.name).join(' or ')}?`;
-    draft = { ...draft, serviceName: null };
-  } else if (resolution.kind === 'unknown' && turn.slots.serviceName) {
-    action = 'collect_info';
-    replyText = `We don't offer that. We have: ${services.map((s) => s.name).join(', ')}. Which would you like?`;
-  } else {
-    const service = resolution.kind === 'resolved' ? resolution.service : null;
-    const complete = isBookingComplete(draft) && service !== null;
-
-    // Consent is only valid for what the user was shown. The stored draft must
-    // already have been complete — so a confirmation card was on screen — and
-    // this turn must not have changed any of it. Without this, a message such
-    // as "book a checkup tomorrow at 2" would write a booking before any
-    // summary was shown, and "yes, but make it 4pm" would book a time nobody
-    // has seen. The model's `intent` is an input to this decision, not the
-    // decision itself.
-    const consentedToShownDraft =
-      turn.intent === 'confirming' &&
-      isBookingComplete(session.bookingDraft) &&
-      isSameBooking(session.bookingDraft, draft);
-
-    if (complete && consentedToShownDraft) {
-      // ---- 7. The user agreed and we have everything: book it -------------
-      const result = await appointments.attemptBooking(
-        { businessId: ctx.businessId, userId: ctx.userId },
-        {
-          serviceId: service!.id,
-          date: draft.date!,
-          time: draft.time!,
-          notes: draft.notes ?? undefined,
-          source: 'chat',
-          chatSessionId: session.id,
-        },
-      );
-
-      if (result.ok) {
-        action = 'booked';
-        appointment = result.appointment;
-        replyText = `Booked — ${service!.name} on ${humanDate(draft.date!)} at ${humanTime(draft.time!)}. It's on your dashboard now.`;
-        // The booking closed the session in its own transaction (bookInSession).
-        await withTransaction((client) =>
-          repo.updateSessionTitle(client, session.id, `${service!.name} — ${shortDate(draft.date!)}`),
-        );
-      } else {
-        // The slot went away, or passed, after the summary was shown.
-        ({ replyText, suggestions, draft } = refusalTurn(draft, result));
-        logger.info(
-          { sessionId: session.id, code: result.code },
-          'Chat booking attempt rejected; offering alternatives',
-        );
-      }
-    } else if (complete) {
-      // Check the slot before summarising it: a "Just to confirm…" for a time
-      // the booking would refuse (after hours, a closed day, taken) invites a
-      // "yes" that can only be turned down. The booking re-checks on "yes".
-      const refused = await appointments.checkBooking(
-        { businessId: ctx.businessId, userId: ctx.userId },
-        { serviceId: service.id, date: draft.date!, time: draft.time! },
-      );
-      if (refused) {
-        ({ replyText, suggestions, draft } = refusalTurn(draft, refused));
-        logger.info({ sessionId: session.id, code: refused.code }, 'Chat draft refused before confirmation');
-      } else {
-        action = 'confirm';
-        // "Don't book anything yet" against the summary already shown: say plainly
-        // that nothing was booked rather than repeat the question as if unheard.
-        const unchanged = isBookingComplete(session.bookingDraft) && isSameBooking(session.bookingDraft, draft);
-        const held = unchanged && negates(input.content);
-        replyText = (held ? heldPrompt : confirmationPrompt)(service.name, draft.date!, draft.time!);
-        // An aside ("do you have parking?") gets the model's short answer, then
-        // the code-worded summary, so consent is still given to the exact slots.
-        if (unchanged && !held && turn.intent === 'other') replyText = `${turn.reply} ${replyText}`;
-      }
-    } else {
-      action = 'collect_info';
-    }
-  }
-
-  // ---- 8. Escalate to the structured form if the conversation is stalling --
-  // An explicit requirement, and good product sense: a user who has gone four
-  // turns without the assistant pinning down a single new detail is not being
-  // served by more conversation. Progress is what is measured, not message
-  // count — a long conversation that keeps filling in details, or a turn that
-  // offers alternative times, is working. The form is offered once, alongside
-  // the chat and pre-filled with whatever was understood; repeating the offer
-  // on every later turn would be nagging.
-  const missing = missingSlots(draft);
-  if (
-    action === 'collect_info' &&
-    !suggestions?.length &&
-    !outcomes.formOffered &&
-    isStalled(outcomes.recent, missing)
-  ) {
-    action = 'needs_form';
-    replyText = `${replyText}\n\nIf it's easier, you can fill in the booking form instead — I've carried over what I have so far.`;
-  }
-
-  // ---- 9. Persist the assistant turn and the new draft --------------------
+  // 5. Persist the assistant turn and the new draft together.
+  const missing = missingSlots(decision.draft);
   const message = await withTransaction(async (client) => {
     const saved = await repo.appendMessage(client, {
       sessionId: session.id,
       role: 'assistant',
-      content: replyText,
+      content: decision.replyText,
       engine: turn.engine,
-      // The raw extraction is kept so a conversation can be debugged — or
-      // replayed — without calling the provider again.
+      // The raw extraction, so a conversation can be debugged or replayed without the provider.
       toolCalls: [{ name: 'respond_to_booking_request', arguments: turn.slots, intent: turn.intent }],
-      meta: {
-        action,
-        missing,
-        draft,
-        ...(suggestions ? { suggestions } : {}),
-        ...(appointment ? { appointmentId: appointment.id } : {}),
-      },
+      meta: turnMeta(decision, missing),
     });
-    await repo.updateDraft(client, session.id, draft);
+    await repo.updateDraft(client, session.id, decision.draft);
     return saved;
   });
 
@@ -354,12 +206,191 @@ async function handleTurn(
     sessionId: session.id,
     userMessage,
     message,
-    action,
-    bookingDraft: draft,
+    action: decision.action,
+    bookingDraft: decision.draft,
     missing,
-    ...(appointment ? { appointment } : {}),
-    ...(suggestions ? { suggestions } : {}),
+    ...(decision.appointment ? { appointment: decision.appointment } : {}),
+    ...(decision.suggestions ? { suggestions: decision.suggestions } : {}),
+    ...(decision.clarification ? { clarification: decision.clarification } : {}),
     engine: turn.engine,
+  };
+}
+
+/** The session this message belongs to, or a new one titled by it. */
+async function openSession(ctx: TurnCtx, input: SendMessageInput): Promise<ChatSessionDto> {
+  if (input.sessionId) {
+    const existing = await repo.findSession(ctx.businessId, ctx.userId, input.sessionId);
+    if (!existing) throw notFound('Conversation');
+    assertOpen(existing);
+    return existing;
+  }
+  // The first message becomes the title: readable without another model call.
+  return withTransaction((client) =>
+    repo.createSession(client, { businessId: ctx.businessId, userId: ctx.userId, title: titleFromMessage(input.content) }),
+  );
+}
+
+/**
+ * Stored before the provider is called, so it survives a failed or abandoned
+ * request. A session opened empty (the form, POST /chat/sessions) is titled
+ * by the first message typed into it.
+ */
+async function recordUserMessage(session: ChatSessionDto, content: string) {
+  return withTransaction(async (client) => {
+    if (session.title === DEFAULT_SESSION_TITLE) await repo.updateSessionTitle(client, session.id, titleFromMessage(content));
+    return repo.appendMessage(client, { sessionId: session.id, role: 'user', content });
+  });
+}
+
+/**
+ * The turn's slots over the stored draft, with the service name resolved to a
+ * catalogue row. An absent field means "not mentioned", not "cleared" (see
+ * mergeSlots); a field the message reopened without settling is cleared, so
+ * the summary still on screen for the old value cannot be agreed to.
+ */
+async function mergeTurn(
+  businessId: string,
+  stored: BookingSlots,
+  turn: ProviderOutput,
+  services: ServiceDto[],
+): Promise<{ draft: BookingSlots; resolution: ServiceResolution }> {
+  let draft = mergeSlots(stored, turn.slots);
+  for (const field of turn.clarify ?? []) draft = { ...draft, [field]: null };
+
+  const resolution = await resolveService(businessId, draft.serviceName, services);
+  if (resolution.kind === 'unknown' && draft.serviceName) draft = { ...draft, serviceName: null };
+  // The catalogue's own name, not the model's near-miss ("whitening").
+  if (resolution.kind === 'resolved') draft = { ...draft, serviceName: resolution.service.name };
+  if (resolution.kind === 'ambiguous') draft = { ...draft, serviceName: null };
+  return { draft, resolution };
+}
+
+async function decideAction(args: {
+  ctx: TurnCtx;
+  session: ChatSessionDto;
+  turn: ProviderOutput;
+  draft: BookingSlots;
+  resolution: ServiceResolution;
+  services: ServiceDto[];
+  history: ProviderInput['history'];
+  content: string;
+}): Promise<Decision> {
+  const { ctx, session, turn, draft, resolution, services } = args;
+  const booking = { businessId: ctx.businessId, userId: ctx.userId };
+
+  if (resolution.kind === 'ambiguous') {
+    return { action: 'collect_info', draft, replyText: `Did you mean ${resolution.options.map((o) => o.name).join(' or ')}?` };
+  }
+  if (resolution.kind === 'unknown' && turn.slots.serviceName) {
+    return {
+      action: 'collect_info',
+      draft,
+      replyText: `We don't offer that. We have: ${services.map((s) => s.name).join(', ')}. Which would you like?`,
+    };
+  }
+
+  const service = resolution.kind === 'resolved' ? resolution.service : null;
+  if (!service || !isBookingComplete(draft)) {
+    return { action: 'collect_info', draft, replyText: turn.reply, ...(await chipsFor(args, service)) };
+  }
+
+  // Consent counts only for what the user was shown: the stored draft was
+  // already complete (a summary was on screen) and this turn changed none of
+  // it. Otherwise "yes, but make it 4pm" would book a time nobody has seen.
+  const unchanged = isBookingComplete(session.bookingDraft) && isSameBooking(session.bookingDraft, draft);
+  if (turn.intent === 'confirming' && unchanged) {
+    const result = await appointments.attemptBooking(booking, {
+      serviceId: service.id,
+      date: draft.date!,
+      time: draft.time!,
+      notes: draft.notes ?? undefined,
+      source: 'chat',
+      chatSessionId: session.id,
+    });
+    if (!result.ok) {
+      // The slot went away, or passed, after the summary was shown.
+      logger.info({ sessionId: session.id, code: result.code }, 'Chat booking attempt rejected; offering alternatives');
+      return refusalTurn(draft, result);
+    }
+    // The booking closed the session in its own transaction (bookInSession).
+    await withTransaction((client) =>
+      repo.updateSessionTitle(client, session.id, `${service.name} — ${shortDate(draft.date!)}`),
+    );
+    return {
+      action: 'booked',
+      draft,
+      appointment: result.appointment,
+      replyText: `Booked — ${service.name} on ${humanDate(draft.date!)} at ${humanTime(draft.time!)}. It's on your dashboard now.`,
+    };
+  }
+
+  // Check the slot before summarising it: a "Just to confirm…" for a time the
+  // booking would refuse invites a "yes" that can only be turned down.
+  const refused = await appointments.checkBooking(booking, { serviceId: service.id, date: draft.date!, time: draft.time! });
+  if (refused) {
+    logger.info({ sessionId: session.id, code: refused.code }, 'Chat draft refused before confirmation');
+    return refusalTurn(draft, refused);
+  }
+
+  // "Don't book anything yet" against the summary shown: say nothing was booked.
+  const held = unchanged && negates(args.content);
+  let replyText = (held ? heldPrompt : confirmationPrompt)(service.name, draft.date!, draft.time!);
+  // An aside ("do you have parking?") gets its short answer, then the
+  // code-worded summary, so consent is still given to the exact slots.
+  if (unchanged && !held && turn.intent === 'other') replyText = `${turn.reply} ${replyText}`;
+  return { action: 'confirm', draft, replyText };
+}
+
+/**
+ * Chips that answer the question this reply asks: the two readings of an
+ * ambiguous detail, or, when only the time is missing, the first free times
+ * that day — within the part of the day the user asked for, if they said one.
+ */
+async function chipsFor(
+  args: { ctx: TurnCtx; turn: ProviderOutput; draft: BookingSlots; history: ProviderInput['history'] },
+  service: ServiceDto | null,
+): Promise<Pick<Decision, 'suggestions' | 'clarification'>> {
+  if (args.turn.clarification) return { clarification: args.turn.clarification };
+  if (!service || !args.draft.date || args.draft.time) return {};
+
+  const part = [...args.history]
+    .reverse()
+    .map((m) => (m.role === 'user' ? statedPartOfDay(m.content) : null))
+    .find((p) => p !== null);
+  const suggestions = await appointments.freeTimes(
+    { businessId: args.ctx.businessId, userId: args.ctx.userId },
+    service.id,
+    args.draft.date,
+    part ? { window: PART_OF_DAY_WINDOW[part] } : {},
+  );
+  return suggestions.length ? { suggestions } : {};
+}
+
+/**
+ * The form is offered once, pre-filled, when STALLED_TURN_THRESHOLD turns in a
+ * row asked for the same details with nothing offered to pick. Progress is
+ * measured, not message count; repeating the offer would be nagging.
+ */
+function offerFormIfStalled(decision: Decision, outcomes: Awaited<ReturnType<typeof repo.recentOutcomes>>): Decision {
+  const offersChoice = Boolean(decision.suggestions?.length || decision.clarification);
+  if (decision.action !== 'collect_info' || offersChoice || outcomes.formOffered) return decision;
+  if (!isStalled(outcomes.recent, missingSlots(decision.draft))) return decision;
+  return {
+    ...decision,
+    action: 'needs_form',
+    replyText: `${decision.replyText}\n\nIf it's easier, you can fill in the booking form instead — I've carried over what I have so far.`,
+  };
+}
+
+/** What is stored with an assistant message so a reload restores the same UI. */
+function turnMeta(decision: Decision, missing: RequiredSlot[]): repo.MessageMeta {
+  return {
+    action: decision.action,
+    missing,
+    draft: decision.draft,
+    ...(decision.suggestions ? { suggestions: decision.suggestions } : {}),
+    ...(decision.clarification ? { clarification: decision.clarification } : {}),
+    ...(decision.appointment ? { appointmentId: decision.appointment.id } : {}),
   };
 }
 
@@ -412,7 +443,8 @@ async function submitDraftNow(
     date: draft.date!,
     time: draft.time!,
     notes: draft.notes ?? undefined,
-    source: 'chat',
+    // Typed into the form, not understood from chat: the badge must say so.
+    source: 'form',
     chatSessionId: sessionId,
   });
 
@@ -494,14 +526,16 @@ function isSameBooking(a: BookingSlots, b: BookingSlots): boolean {
  * is accurate, instant, and costs nothing. What failed is dropped from the
  * draft so the next turn asks for it again rather than re-proposing it.
  */
-function refusalTurn(
-  draft: BookingSlots,
-  failure: appointments.BookingFailure,
-): { replyText: string; suggestions: AssistantTurnDto['suggestions']; draft: BookingSlots } {
+function refusalTurn(draft: BookingSlots, failure: appointments.BookingFailure): Decision {
   const replyText = failure.suggestions?.length
     ? `${failure.message} I could do ${failure.suggestions.map((s) => s.label).join(', or ')} — which works?`
     : `${failure.message} ${clearsDay(failure.code) ? 'Which day and time would suit you?' : 'What other time would suit you?'}`;
-  return { replyText, suggestions: failure.suggestions, draft: clearRejected(draft, failure.code) };
+  return {
+    action: 'collect_info',
+    replyText,
+    draft: clearRejected(draft, failure.code),
+    ...(failure.suggestions ? { suggestions: failure.suggestions } : {}),
+  };
 }
 
 /**

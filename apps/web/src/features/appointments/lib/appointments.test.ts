@@ -1,7 +1,7 @@
 import { listAppointmentsSchema } from '@appt/shared';
 import { describe, expect, it } from 'vitest';
 import { makeAppointment } from '../test-support';
-import { VIEW_FILTERS, canCancel, displayStatus, formatCount, summarize, LIST_LIMIT } from './appointments';
+import { VIEW_FILTERS, canCancel, displayStatus, formatCount, LIST_LIMIT } from './appointments';
 
 const NOW = new Date('2026-10-02T12:00:00.000Z');
 const at = (id: string, startsAt: string, status: 'confirmed' | 'cancelled' | 'pending' = 'confirmed') =>
@@ -28,21 +28,6 @@ describe('VIEW_FILTERS', () => {
   });
 });
 
-describe('summarize', () => {
-  it('counts the lists and takes the head of the soonest-first upcoming list as "next"', () => {
-    const summary = summarize(
-      [at('a', '2026-10-06T15:00:00.000Z'), at('b', '2026-10-09T15:00:00.000Z')],
-      [at('x', '2026-10-03T15:00:00.000Z', 'cancelled')],
-    );
-    expect(summary.upcomingCount).toBe(2);
-    expect(summary.next?.id).toBe('a');
-    expect(summary.cancelledCount).toBe(1);
-  });
-
-  it('has no next appointment when nothing is upcoming', () => {
-    expect(summarize([], [])).toEqual({ upcomingCount: 0, next: null, cancelledCount: 0 });
-  });
-});
 
 describe('canCancel', () => {
   it('allows an active booking that has not started', () => {

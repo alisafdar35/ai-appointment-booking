@@ -135,20 +135,27 @@ function DialogPanel({
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         className={cn(
-          'relative max-h-[90dvh] w-full animate-rise-in overflow-y-auto rounded-t-2xl border border-border bg-surface p-6 shadow-popover sm:rounded-xl',
+          'relative flex max-h-[90dvh] w-full animate-rise-in flex-col overflow-hidden rounded-t-2xl border border-border bg-surface shadow-popover sm:rounded-xl',
           SIZES[size],
         )}
       >
-        <h2 id={titleId} className="pr-8 text-lg font-semibold tracking-tight text-foreground">
-          {title}
-        </h2>
-        {description ? (
-          <p id={descriptionId} className="mt-1.5 text-sm text-muted-foreground">
-            {description}
-          </p>
+        {/* Only the content scrolls: the actions stay in view however long the form gets. */}
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
+          <h2 id={titleId} className="pr-8 text-lg font-semibold tracking-tight text-foreground">
+            {title}
+          </h2>
+          {description ? (
+            <p id={descriptionId} className="mt-1.5 text-sm text-muted-foreground">
+              {description}
+            </p>
+          ) : null}
+          {children ? <div className="mt-4">{children}</div> : null}
+        </div>
+        {footer ? (
+          <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-border bg-surface px-6 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 sm:flex-row sm:justify-end sm:pb-4">
+            {footer}
+          </div>
         ) : null}
-        {children ? <div className="mt-4">{children}</div> : null}
-        {footer ? <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">{footer}</div> : null}
         {/* Last in DOM order so the first Tab stop is the content, not the close icon. */}
         {dismissible ? (
           <button

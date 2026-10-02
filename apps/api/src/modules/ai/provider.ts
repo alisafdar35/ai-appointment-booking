@@ -1,4 +1,4 @@
-import type { AiEngine, BookingSlots } from '@appt/shared';
+import type { AiEngine, BookingSlots, ClarificationDto } from '@appt/shared';
 import type { PromptContext } from './prompts.js';
 import type { ASSISTANT_INTENTS } from './tools.js';
 
@@ -25,6 +25,8 @@ export interface ProviderOutput {
    * no longer be agreed to while the reply asks which one was meant.
    */
   clarify?: ('date' | 'time')[] | undefined;
+  /** The readings the clarifying question offers, for the client to show as answers. */
+  clarification?: ClarificationDto | undefined;
 }
 
 /**

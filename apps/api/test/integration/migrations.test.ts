@@ -53,7 +53,7 @@ describe('migrations and seed', () => {
         })),
       );
       assert.deepEqual(rows, expected);
-      assert.ok(rows.length >= 3);
+      assert.deepEqual(rows.map((r) => r.filename), ['001_schema.sql', '002_indexes.sql']);
     });
 
     it('is a no-op when run again', async () => {
@@ -63,12 +63,12 @@ describe('migrations and seed', () => {
     });
 
     it('refuses to continue when an applied migration has been edited since', async () => {
-      await app.db.query(`UPDATE schema_migrations SET checksum = 'edited-after-the-fact' WHERE filename = '001_init.sql'`);
+      await app.db.query(`UPDATE schema_migrations SET checksum = 'edited-after-the-fact' WHERE filename = '001_schema.sql'`);
       try {
-        await assert.rejects(migrate(), /001_init\.sql was modified after being applied/);
+        await assert.rejects(migrate(), /001_schema\.sql was modified after being applied/);
       } finally {
-        const original = createHash('sha256').update(await readFile(path.join(DB_DIR, 'migrations/001_init.sql'), 'utf8')).digest('hex');
-        await app.db.query(`UPDATE schema_migrations SET checksum = $1 WHERE filename = '001_init.sql'`, [original]);
+        const original = createHash('sha256').update(await readFile(path.join(DB_DIR, 'migrations/001_schema.sql'), 'utf8')).digest('hex');
+        await app.db.query(`UPDATE schema_migrations SET checksum = $1 WHERE filename = '001_schema.sql'`, [original]);
       }
       assert.deepEqual((await migrate()).applied, [], 'and recovers once the ledger matches again');
     });
@@ -97,27 +97,51 @@ describe('migrations and seed', () => {
         'users',
       ]);
 
-      const indexes = await app.db.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE schemaname = 'public'`);
-      const names = new Set(indexes.rows.map((r) => r.indexname));
-      for (const expected of [
-        'appointments_user_starts_idx',
-        'appointments_business_starts_idx',
-        'appointments_upcoming_idx',
-        'appointments_no_overlap',
-        'appointments_customer_no_overlap',
-        'chat_sessions_user_recent_idx',
-        'chat_messages_session_id_idx',
-        'refresh_tokens_user_idx',
-        'ai_logs_session_idx',
+      // Exactly the indexes the two files declare: every one not backing a
+      // constraint (PK/UNIQUE/EXCLUDE) is listed here, so an index cannot be
+      // added or lost without this list, and the comment naming its query, changing.
+      const standalone = await app.db.query<{ indexname: string }>(
+        `SELECT i.indexname FROM pg_indexes i
+         WHERE i.schemaname = 'public' AND i.tablename <> 'schema_migrations'
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = (quote_ident(i.indexname))::regclass)
+         ORDER BY i.indexname`,
+      );
+      assert.deepEqual(standalone.rows.map((r) => r.indexname), [
+        'ai_logs_created_idx',
         'ai_logs_failures_idx',
-        'users_business_email_key',
-        'users_email_idx',
-        'services_business_name_key',
-        'idempotency_keys_pkey',
+        'ai_logs_session_idx',
+        'appointments_business_starts_idx',
+        'appointments_chat_session_idx',
+        'appointments_one_live_per_chat_session',
+        'appointments_service_idx',
+        'appointments_upcoming_idx',
+        'appointments_user_starts_idx',
+        'chat_messages_session_id_idx',
+        'chat_sessions_user_recent_idx',
+        'idempotency_keys_appointment_idx',
         'idempotency_keys_created_idx',
-      ]) {
-        assert.ok(names.has(expected), `missing index ${expected}`);
-      }
+        'refresh_tokens_expires_idx',
+        'refresh_tokens_user_idx',
+        'services_business_active_idx',
+        'users_business_created_idx',
+        'users_email_idx',
+      ]);
+
+      const constraints = await app.db.query<{ conname: string; contype: string }>(
+        `SELECT conname, contype::text FROM pg_constraint
+         WHERE connamespace = 'public'::regnamespace AND contype IN ('u', 'x') ORDER BY conname`,
+      );
+      assert.deepEqual(constraints.rows, [
+        { conname: 'appointments_customer_no_overlap', contype: 'x' },
+        { conname: 'appointments_no_overlap', contype: 'x' },
+        { conname: 'businesses_slug_key', contype: 'u' },
+        { conname: 'chat_sessions_business_id_id_key', contype: 'u' },
+        { conname: 'refresh_tokens_token_hash_key', contype: 'u' },
+        { conname: 'services_business_id_id_key', contype: 'u' },
+        { conname: 'services_business_name_key', contype: 'u' },
+        { conname: 'users_business_email_key', contype: 'u' },
+        { conname: 'users_business_id_id_key', contype: 'u' },
+      ]);
     });
   });
 

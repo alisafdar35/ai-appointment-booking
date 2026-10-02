@@ -1,37 +1,35 @@
 # Slotly — AI-assisted appointment booking
 
-Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next Wednesday around 3"* and gets a booked appointment. The assistant collects what is missing and shows a confirmation card. If the conversation stalls, it offers a pre-filled form. If the language model is slow, rate-limited, misconfigured or simply wrong, booking still works. The LLM only **extracts** information. Ordinary code and a Postgres constraint **decide** what gets booked. This split is the core design decision, and the rest of the system is built around it.
+> **For reviewers**
+>
+> - **Live demo:** https://ai-appointment-booking-psi.vercel.app (sign in as `customer@bluewave.test` / `Password123!`; more logins [below](#live-demo)). First request after a pause can take ~30–60 s while the free API host wakes.
+> - **Repo:** https://github.com/alisafdar35/ai-appointment-booking
+> - **Architecture in one sentence:** a Next.js app proxies REST to an Express API, where Mistral only *extracts* booking details through one forced tool call, and plain code plus Postgres constraints *decide* what gets booked; Socket.IO adds live updates on top.
+> - **The four sections the brief asks for:** [Architecture](#architecture) · [Run locally](#run-locally) · [Design decisions and tradeoffs](#design-decisions-and-tradeoffs) · [Assumptions and known limitations](#assumptions-and-known-limitations)
+> - **Every requirement and edge case, with the test that proves it:** [docs/verification-matrix.md](docs/verification-matrix.md)
 
-**Stack:** Next.js 15 (React 19, TanStack Query, react-hook-form, Tailwind) · Express 4 + Socket.IO · PostgreSQL 16 · Mistral (with a deterministic fallback engine) · zod schemas shared by both sides through `@appt/shared`.
+Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next Wednesday around 3"* and gets a booked appointment. The assistant asks for what is missing, one question at a time, offers real free times as chips, and shows a confirmation card. If the conversation stalls it offers a pre-filled form. If the language model is slow, rate-limited, misconfigured or simply wrong, booking still works. The LLM only **extracts**; ordinary code and Postgres constraints **decide**. That split is the core design decision, and the rest of the system is built around it.
 
----
+**Stack:** Next.js 15 (React 19, TanStack Query, react-hook-form, Tailwind) · Express 4 + Socket.IO · PostgreSQL 16 · Mistral (`ministral-8b-latest`) with a deterministic fallback engine · zod schemas shared by both sides through `@appt/shared`.
 
 ## Live demo
 
 | | |
 |---|---|
 | Web app | **https://ai-appointment-booking-psi.vercel.app** |
-| API health | **https://slotly-api-r5g6.onrender.com/health** (DB status, active AI provider, uptime; per-tenant AI usage is at the owner-only `GET /api/ai/summary`) |
-| Demo video | _coming soon_ |
+| API health | https://slotly-api-r5g6.onrender.com/health (DB status, active AI provider, uptime) |
 | Repository | https://github.com/alisafdar35/ai-appointment-booking |
 
-> The API runs on Render's free plan, which sleeps after 15 minutes idle: the first request after a pause can take ~25–60 s while it wakes (measured 24 s). The app shows "Waking up the server…" and keeps you signed in meanwhile. Everything is fast after that.
+The API runs on Render's free plan, which sleeps after 15 minutes idle. The app shows "Waking up the server…" and keeps you signed in meanwhile.
 
-**Demo logins** (password for all: `Password123!`)
-
-| Email | Role | Tenant |
+| Email (password `Password123!`) | Role | Tenant |
 |---|---|---|
-| `customer@bluewave.test` | customer | Bluewave Dental (`bluewave`, America/New_York, 09:00–17:00) |
+| `customer@bluewave.test` | customer | Bluewave Dental (code `bluewave`, America/New_York, 09:00–17:00) |
 | `staff@bluewave.test` | staff (sees every customer's bookings) | Bluewave Dental |
-| `owner@bluewave.test` | owner | Bluewave Dental |
-| `owner@northside.test` | owner | Northside Clinic (`northside`, Europe/London), the second tenant used to show isolation |
+| `owner@bluewave.test` | owner (also `GET /api/ai/summary`) | Bluewave Dental |
+| `owner@northside.test` | owner | Northside Clinic (Europe/London), a second tenant to show isolation |
 
-The sign-in page can fill in the customer account for you. You can also sign up with a new business, or join Bluewave with the business code `bluewave`.
-
-
----
-
-## Screenshots
+You can also sign up and join Bluewave with the code `bluewave` (the default), or create a business of your own.
 
 | Conversational booking | Booked, with live dashboard |
 |---|---|
@@ -39,280 +37,163 @@ The sign-in page can fill in the customer account for you. You can also sign up 
 | **Form fallback (needs_form)** | **Appointments dashboard** |
 | ![Fallback form](docs/screenshots/assistant-fallback-form.png) | ![Appointments dashboard](docs/screenshots/appointments-dashboard.png) |
 
-More screenshots: [landing](docs/screenshots/landing.png), [login](docs/screenshots/login.png), [signup](docs/screenshots/signup.png), [empty assistant](docs/screenshots/assistant-empty.png), [mid-conversation](docs/screenshots/assistant-conversation.png), [booking dialog](docs/screenshots/appointments-booking-dialog.png), [cancel dialog](docs/screenshots/appointments-cancel-dialog.png), [staff view](docs/screenshots/staff-dashboard.png), [dark mode](docs/screenshots/dark-assistant.png), [mobile assistant](docs/screenshots/mobile-assistant.png), [mobile appointments](docs/screenshots/mobile-appointments.png).
-
----
+More: [landing](docs/screenshots/landing.png) · [login](docs/screenshots/login.png) · [signup](docs/screenshots/signup.png) · [empty assistant](docs/screenshots/assistant-empty.png) · [mid-conversation](docs/screenshots/assistant-conversation.png) · [booking dialog](docs/screenshots/appointments-booking-dialog.png) · [cancel dialog](docs/screenshots/appointments-cancel-dialog.png) · [staff view](docs/screenshots/staff-dashboard.png) · [dark mode](docs/screenshots/dark-assistant.png) · [mobile assistant](docs/screenshots/mobile-assistant.png) · [mobile appointments](docs/screenshots/mobile-appointments.png)
 
 ## What the brief asked for, and where it is
 
-The full line-by-line audit, including what is partial, is in [docs/assessment-checklist.md](docs/assessment-checklist.md). Every use case and edge case (auth, AI conversation, scheduling, reliability, submission) is mapped to the test that proves it in [docs/verification-matrix.md](docs/verification-matrix.md).
-
 | Brief | Implementation |
 |---|---|
-| Embedded chatbot UI | `/assistant`: conversation list, transcript, composer, booking-draft side rail, inline confirmation, booked and suggestion cards ([features/chat](apps/web/src/features/chat)) |
-| Real-time chat | REST request/response for each turn, plus Socket.IO push for typing indicators, turns from your other tabs, and appointment changes. The app works fully if the socket is down; a status pill shows "Live", "Connecting…" or "Live updates unavailable" ([realtime](apps/api/src/realtime/index.ts)) |
-| Signup/login with JWT | 15-minute HS256 access JWT and an opaque 7-day refresh token, both in httpOnly cookies. Refresh tokens rotate, and replaying an old one is detected. A Bearer header also works for API clients ([auth](apps/api/src/modules/auth)) |
-| Booking UI (form or conversational) | Both. Chat, a "Prefer a form?" card inside the chat, and a booking dialog on `/appointments` with a live slot picker. All three go through **one** booking service |
-| REST: auth, chat, appointments | 17 REST endpoints plus `/health`, documented in [docs/api.md](docs/api.md) |
-| Validation, logging, rate limiting, errors | Shared zod schemas through the `validate()` middleware · pino with request ids and redaction · five rate-limit tiers · one error envelope with stable codes ([middleware](apps/api/src/middleware)) |
-| LLM understands requests and extracts details | Mistral chat completions with **one forced tool call**. The tool's JSON Schema is generated from the shared zod booking schema ([ai](apps/api/src/modules/ai)) |
-| Multi-turn memory | The partial booking draft is stored on `chat_sessions.booking_draft`, restated in every prompt, and merged one field at a time. History sent to the model is capped (`AI_HISTORY_TURNS`) |
-| Fallback to a form | After 4 turns in a row with no progress (the same details still missing, no times offered), the assistant returns `needs_form` with a form pre-filled from the draft, at most once per conversation. A "Prefer a form?" link is always available |
-| AI interaction logging | One row per provider call in `ai_interaction_logs`: latency, tokens, outcome, extracted slots and guardrail corrections. Per-tenant summary (calls, error rate, p50/p95 latency per provider) at the owner-only `GET /api/ai/summary` |
-| SQL DDL, sample inserts, indexes, performance notes, multi-tenancy | [db/migrations](db/migrations), [db/seed.sql](db/seed.sql), [db/verify.sql](db/verify.sql), [docs/database.md](docs/database.md). `business_id` with composite tenant foreign keys |
-
----
+| Chatbot UI, real-time | `/assistant`: conversations, transcript, composer, draft rail, confirmation and booked cards. Each turn is REST; Socket.IO pushes typing, other-tab turns and appointment changes, and the app works fully without it |
+| Auth (JWT) | 15-min HS256 access JWT + rotating 7-day opaque refresh token, both httpOnly cookies |
+| Booking UI | Chat, an in-chat form, and a dialog with a live slot picker on `/appointments`, all through **one** booking service |
+| REST API + middleware | 17 endpoints plus `/health` ([api.md](docs/api.md)); zod validation, pino logs with request ids, five rate-limit tiers, one error envelope |
+| AI: understand, extract, remember, fall back, log | One forced Mistral tool call per turn (schema generated from the shared zod schema); the draft lives in Postgres; `needs_form` after 4 turns without progress; one `ai_interaction_logs` row per call ([ai-integration.md](docs/ai-integration.md)) |
+| Database | [001_schema.sql](db/migrations/001_schema.sql), [002_indexes.sql](db/migrations/002_indexes.sql), [seed.sql](db/seed.sql), [verify.sql](db/verify.sql); `business_id` multi-tenancy with composite FKs ([database.md](docs/database.md)) |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  subgraph Browser
-    UI[Next.js app<br/>React 19 + TanStack Query]
-  end
-
-  subgraph Vercel
-    NX[Next.js server<br/>static pages + /api rewrite]
-  end
-
-  subgraph Render
-    API[Express 4 API<br/>auth · chat · appointments]
-    WS[Socket.IO gateway<br/>user + business rooms]
-    AI[AI orchestrator<br/>guardrails]
-    FB[Deterministic engine<br/>chrono-node + rules]
-  end
-
-  DB[(PostgreSQL 16<br/>Neon)]
-  M[[Mistral API]]
-
-  UI -- "same-origin /api/* (httpOnly cookies)" --> NX
-  NX -- "rewrite /api/:path*" --> API
+  UI[Browser<br/>Next.js app] -- "same-origin /api/* (httpOnly cookies)" --> NX[Vercel<br/>Next.js server + /api rewrite]
+  NX --> API
   UI -- "WebSocket, token in handshake" --> WS
-  API --> AI
-  AI -- "forced tool call, timeout + 1 retry" --> M
-  AI -. "any failure / no key" .-> FB
-  API --> DB
-  WS --- API
+  subgraph Render
+    API[Express API<br/>auth · chat · appointments] --- WS[Socket.IO<br/>user + business rooms]
+    API --> AI[AI module<br/>parse · guardrails · copy]
+    AI -. "any failure / no key" .-> FB[Deterministic engine<br/>chrono-node + rules]
+  end
+  AI -- "forced tool call, timeout + 1 retry" --> M[[Mistral]]
+  API --> DB[(PostgreSQL 16 on Neon)]
 ```
 
-- **The browser only talks to its own origin for REST.** Next.js proxies `/api/*` to the API, so the auth cookies are first-party: `SameSite=Lax` and no third-party-cookie dependency. Socket.IO connects **directly** to the API, because WebSocket upgrades do not survive the rewrite. It authenticates with the in-memory access token.
-- **Clear service boundaries.** Routes only handle HTTP. Services hold the rules. Repositories hold the SQL. The AI module returns slots and a sentence, and it cannot write to the database. See [docs/architecture.md](docs/architecture.md).
+- **REST goes through the web app's own origin**, so auth cookies are first-party (`SameSite=Lax`). Socket.IO connects to the API directly, because WebSocket upgrades do not survive the rewrite.
+- **Routes handle HTTP, services hold the rules, repositories hold the SQL.** The AI module returns slots, a reply and an intent; it cannot write to the database or choose what the UI does. Details: [docs/architecture.md](docs/architecture.md).
 
-### One chat turn
+**One chat turn** (`POST /api/chat/messages`):
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant B as Browser
-  participant R as POST /api/chat/messages
   participant C as Chat service
-  participant A as AI orchestrator
+  participant A as AI module
   participant M as Mistral
   participant K as Booking service
   participant D as Postgres
-  participant S as Socket.IO
-
-  B->>R: { content, sessionId? }
-  R->>R: requireAuth · chatLimiter (20/min/user) · validate(sendMessageSchema)
-  R->>C: handleUserMessage
-  C->>D: load session + draft (409 SESSION_CLOSED if already booked)
-  C->>D: store user message first (never lost)
-  C->>S: assistant:typing { typing: true } to the user's other tabs
-  C->>A: prompt context (today, tz, hours, catalogue, draft, last N turns)
-  A->>M: one forced tool call (schema from @appt/shared)
+  B->>C: { content, sessionId? } (auth, 20/min limiter, zod)
+  C->>D: queue behind earlier turns of this conversation · store user message first
+  C->>A: context: today, timezone, hours, catalogue, stored draft, last N turns
+  A->>M: one forced tool call
   alt usable answer
-    M-->>A: tool arguments
-    A->>A: zod parse · date/time cross-check · service grounding · reply guardrail
-  else timeout / 429 / 5xx / 401 / invalid output
+    M-->>A: { slots, reply, intent }
+    A->>A: guardrails: date/time cross-check (parse.ts), one clarifying question, grounding, consent, off-topic
+  else timeout / 429 / 5xx / bad key / invalid output
     A->>A: deterministic engine reads the same message
   end
   A--)D: ai_interaction_logs (fire-and-forget)
-  A-->>C: { slots, reply, intent, engine }
-  C->>C: mergeSlots over draft · resolve service name in tenant catalogue
-  C->>K: only if the draft was already confirmed and unchanged: attemptBooking
-  K->>D: checkSlot, then INSERT (EXCLUDE constraint decides races)
-  K-->>C: booked, or refusal + nearby free times
-  C->>C: choose action: collect_info | confirm | booked | needs_form
-  C->>D: assistant message + meta {action, suggestions, missing, draft, appointmentId}, new draft
-  R->>S: assistant:typing false · assistant:turn · appointment:created
-  R-->>B: 201 AssistantTurnDto
+  C->>C: mergeSlots over the draft · resolve service in the tenant catalogue
+  C->>K: decideAction: confirmed and unchanged? attemptBooking : checkBooking before the summary
+  K->>D: EXCLUDE constraints decide races
+  C->>K: time missing? freeTimes (within the stated morning / afternoon / evening)
+  C->>D: assistant message + meta {action, draft, suggestions, clarification}, new draft
+  C-->>B: 201 AssistantTurnDto, plus socket push to the user's other tabs
 ```
 
----
+## Run locally
 
-## Repository layout
-
-```
-apps/
-  api/                Express + Socket.IO (TypeScript, ESM)
-    src/config        env validation (zod, fails at boot)
-    src/middleware    requestId/logging, auth, origin check, rate limits, validate, errors
-    src/modules/      auth · appointments (+ availability) · chat · ai (provider, mistral, fallback, guardrails, tools, prompts, logs)
-    src/realtime      Socket.IO gateway
-    src/db            pool, migration runner, seed runner
-    test/             node:test unit + integration (real HTTP, real Postgres)
-  web/                Next.js 15 App Router
-    src/app           routes: /, /login, /signup, /(app)/assistant, /(app)/appointments
-    src/features      auth · chat · appointments · booking · marketing
-    src/lib           api client, query hooks + keys, socket, datetime
-    src/providers     Auth, Query, Realtime, Toast
-    e2e/              Playwright specs (desktop + mobile projects)
-packages/shared       zod schemas, DTO types, ERROR_CODES, SOCKET_EVENTS
-db/                   migrations/001–006, seed.sql, verify.sql
-scripts/              e2e.mjs (fresh database + own stack + Playwright), wait-for-db.mjs
-docs/                 architecture, api, database, ai-integration, frontend, decisions, deployment, demo script, checklist
-```
-
----
-
-## Quick start
-
-**Prerequisites:** Node 22 (`.nvmrc`), and either Docker or your own PostgreSQL 15+ with the `btree_gist`, `citext` and `pgcrypto` extensions available.
+Needs Node 22 (`.nvmrc`) and either Docker or your own PostgreSQL 15+ with `btree_gist`, `citext` and `pgcrypto` available.
 
 ```bash
-git clone https://github.com/alisafdar35/ai-appointment-booking.git
-cd ai-appointment-booking
-cp .env.example .env          # set JWT_SECRET (32+ chars); MISTRAL_API_KEY is optional
-npm run setup                 # npm install, Postgres via docker compose on :5433, migrate, seed
-npm run dev                   # builds @appt/shared, then API on :4000 and web on :3000
+git clone https://github.com/alisafdar35/ai-appointment-booking.git && cd ai-appointment-booking
+cp .env.example .env    # set JWT_SECRET (32+ chars); MISTRAL_API_KEY is optional
+npm run setup           # npm install, Postgres via docker compose on :5433, migrate, seed
+npm run dev             # API on :4000, web on :3000
 ```
 
 Open http://localhost:3000 and sign in as `customer@bluewave.test` / `Password123!`.
 
-- **Without Docker:** create a database (PostgreSQL 15+; the role needs CREATE on it, and `btree_gist`, `citext` and `pgcrypto` must be available), point `DATABASE_URL` in `.env` at it, then run `npm install && npm run db:migrate && npm run db:seed && npm run dev`. For the API tests, also set `TEST_DATABASE_URL` (see Testing). To check the schema guarantees: `psql "<your DATABASE_URL>" -f db/verify.sql`.
-- **Other ports:** set `PORT` and `CORS_ORIGINS=http://localhost:<webport>` in `.env`, set `API_ORIGIN` and `NEXT_PUBLIC_SOCKET_URL` to `http://localhost:<apiport>` in `apps/web/.env.local`, then run `npm run dev:api` and `npm run dev -w @appt/web -- -p <webport>`.
-- **Without a Mistral key:** everything works. Replies come from the deterministic engine and the UI labels them "Guided mode".
-- **Reset local data:** `npm run db:reset` (drops the Docker volume, then migrates and seeds again).
-- The web app reads its own env from `apps/web/.env.local` (see [apps/web/.env.example](apps/web/.env.example)). The defaults already point at `localhost:4000`.
+- **Without Docker:** create a database, point `DATABASE_URL` in `.env` at it, then `npm install && npm run db:migrate && npm run db:seed && npm run dev`. `psql "$DATABASE_URL" -f db/verify.sql` demonstrates the schema guarantees.
+- **Other ports:** set `PORT` and `CORS_ORIGINS=http://localhost:<webport>` in `.env`, and `API_ORIGIN` / `NEXT_PUBLIC_SOCKET_URL` (`http://localhost:<apiport>`) in `apps/web/.env.local`; then `npm run dev:api` and `npm run dev -w @appt/web -- -p <webport>`.
+- **Without a Mistral key** everything works; replies come from the deterministic engine, labelled "Guided mode".
+- Every variable: [docs/configuration.md](docs/configuration.md). Reset local data: `npm run db:reset`.
 
----
+**Tests:** `npm test` (API unit + integration against real Postgres, web unit), `npm run e2e` (Playwright on a freshly built, isolated stack on :3100/:4100), `npm run typecheck && npm run lint`. CI runs all of them. Counts and details: [docs/testing.md](docs/testing.md).
 
-## Configuration
+## Design decisions and tradeoffs
 
-API variables are validated once at boot by [apps/api/src/config/env.ts](apps/api/src/config/env.ts). The process exits with a readable list if any are missing or malformed. Blank values count as unset.
-
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `DATABASE_URL` | **yes** | — | Postgres connection string |
-| `JWT_SECRET` | **yes** | — | HS256 signing key, at least 32 characters |
-| `NODE_ENV` | no | `development` | `production` turns on secure cookies and JSON logs, hides error debug text, and refuses the `.env.example` placeholder `JWT_SECRET` |
-| `PORT` | no | `4000` | HTTP + Socket.IO port |
-| `DATABASE_SSL` | no | `false` | `true` for managed Postgres (Neon). TLS with certificate verification |
-| `PG_POOL_MAX` | no | `10` | Connection pool size (1–100) |
-| `ACCESS_TOKEN_TTL_SECONDS` | no | `900` | Access JWT lifetime |
-| `REFRESH_TOKEN_TTL_DAYS` | no | `7` | Refresh token lifetime |
-| `CORS_ORIGINS` | no | `http://localhost:3000` | Comma-separated exact origins. Also the CSRF allow-list for state-changing requests and the Socket.IO CORS list |
-| `TRUST_PROXY_HOPS` | no | `0` | Reverse proxies in front of the API, used for `req.ip` (rate-limit keys). `render.yaml` sets `2` (Vercel rewrite, then Render's edge) |
-| `CROSS_SITE_COOKIES` | no | `false` | `true` only if the browser calls the API cross-site (cookies become `SameSite=None; Secure`). Not needed with the default proxy setup |
-| `MISTRAL_API_KEY` | no | unset | Turns on the LLM path. Unset means the deterministic engine is the main path |
-| `MISTRAL_MODEL` | no | `ministral-8b-latest` | Model id. Small and fast is enough for slot extraction, and it has free-tier quota |
-| `MISTRAL_BASE_URL` | no | `https://api.mistral.ai` | Override for a proxy or the test stub |
-| `AI_TIMEOUT_MS` | no | `12000` | Hard timeout for each provider attempt (1000–60000) |
-| `AI_MAX_RETRIES` | no | `1` | Retries on transient failures (0–5) |
-| `AI_HISTORY_TURNS` | no | `12` | Messages of history sent to the model (2–40) |
-| `LOG_LEVEL` | no | `info` | pino level (`silent` in tests) |
-| `RATE_LIMIT_DISABLED` | no | `false` | Turns off every limiter (tests and e2e only) |
-| `TEST_DATABASE_URL` | tests only | `postgresql://appt:appt_local_dev@localhost:5433/appt_test` | API test server. The database name must end in `_test` |
-
-Web (`apps/web`, read by Next.js **at build time**):
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `API_ORIGIN` | `http://localhost:4000` | Where the Next.js server proxies `/api/*` |
-| `NEXT_PUBLIC_SOCKET_URL` | `http://localhost:4000` | Socket.IO origin the browser connects to. Also added to the CSP `connect-src` |
-| `E2E_BASE_URL` | `http://localhost:3000` | Playwright target for `npm run e2e:run`. `npm run e2e` sets it to its own web app |
-
----
-
-## Testing
-
-| Suite | Command | Count (latest local run) | Needs |
-|---|---|---|---|
-| API unit + integration | `npm test -w @appt/api` | **769 tests**, 26 files, all passing (~50 s) | Postgres on :5433, or `TEST_DATABASE_URL` pointing at a server where the role can CREATE DATABASE (name must end in `_test`; it creates `<name>` and `<name>_1`…`_3`) |
-| Web unit/component | `npm test -w @appt/web` | **462 tests**, 40 files, all passing (~8 s) | nothing |
-| End-to-end (Playwright) | `npm run e2e` | **98 tests** (49 scenarios × desktop and mobile Chrome, 11 spec files): 96 pass, 2 skipped by design (the two `accessibility.spec` scenarios, keyboard-only and 200% zoom, run on desktop only); `E2E_ALL_BROWSERS=1` adds Firefox and WebKit | Postgres on :5433, ports 3100 and 4100 free |
-| Types + lint | `npm run typecheck && npm run lint` | clean | — |
-
-- The **API integration tests** run the real `createApp()` over HTTP, against a database built by the production migration runner and `db/seed.sql`. Mistral is exercised through a local stub that speaks the chat-completions protocol. Details: [apps/api/test/README.md](apps/api/test/README.md).
-- **E2E** brings up a stack of its own. `npm run e2e` ([scripts/e2e.mjs](scripts/e2e.mjs)) drops and recreates the `appt_e2e` database (it refuses any name not ending in `_e2e`, and any non-local host), migrates it with the real runner and seeds it, builds everything, starts the API on :4100 and the production web build on :3100, waits for both to be healthy, runs Playwright, and stops both servers even when a test fails or the run is interrupted. A development stack on :3000/:4000 is left alone, and the web build goes to `apps/web/.next-e2e`, not `.next`.
-  ```bash
-  npm run e2e                           # the whole suite, desktop + mobile
-  npm run e2e -- --project=desktop      # extra arguments go to Playwright
-  npm run e2e -- --skip-build           # reuse the last build; the database is still recreated
-  ```
-  The API runs with no Mistral key (a preflight refuses any stack with a model, so every reply comes from the deterministic engine) and with rate limits off. Each Playwright worker books only on its own business days (`laneDays` in [e2e/support/api.ts](apps/web/e2e/support/api.ts)), so parallel tests never compete for a slot. `npm run e2e:run` runs Playwright alone against `E2E_BASE_URL`, for debugging a stack started by hand.
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, typecheck, lint, API tests with a Postgres 16 service, web tests and the API and web production builds on every push and PR, and a second job runs `npm run e2e` against its own Postgres service.
-
----
-
-## Key design decisions
-
-Full ADRs with alternatives are in [docs/decisions.md](docs/decisions.md).
+The ten that matter most are written up as ADRs in [docs/decisions.md](docs/decisions.md).
 
 | Decision | Why | Cost |
 |---|---|---|
-| **The LLM extracts, code decides.** One forced tool call returns slots and a reply. The chat service picks the action, and the booking service plus a DB constraint enforce the rules | A model cannot book, skip business hours, or see another tenant. Its mistakes become a wrong question, not a wrong booking | More orchestration code than "let the agent call `book()`" |
-| **Deterministic engine as a first-class provider** | A provider outage or bad key does not stop bookings, and reviewers without a key see the full flow | A second extractor (chrono-node + rules) to maintain; replies are plainer |
-| **Guardrails check model output against code** (date cross-check, reply replacement, consent rule) | Mistakes seen against the live model, e.g. "next Wednesday" resolved to a Thursday | Some false positives replace warm wording with a template |
-| **Draft lives in Postgres, not in the prompt** | Survives reloads, new tabs and provider failover. Prompt size stays flat | Needs a merge policy (`mergeSlots`: an absent field is "not mentioned", never "cleared") |
-| **`EXCLUDE USING gist` against overlap** | Double-booking is solved in the schema, so concurrent requests cannot both commit. A second constraint stops one customer holding two overlapping bookings | Overlap is per *service* (one chair per service). A real clinic needs per-staff or per-room resources |
-| **Shared-schema multi-tenancy with composite FKs** `(business_id, id)` | The database refuses rows that point into another tenant | Wider keys; Row Level Security would be the next layer |
-| **httpOnly cookies + proxy, rotating opaque refresh tokens** | No token in `localStorage`, first-party cookies, theft detection with a 15 s multi-tab grace window | The socket still needs a JS-readable token, held only in memory |
-| **Socket.IO as an enhancement** | Every feature works over REST. A blocked WebSocket shows "Live updates unavailable", not a broken app | Two delivery paths to reconcile (handled by message ids) |
-| **Plain SQL + a ~90-line migration runner, no ORM** | The DDL *is* the deliverable; checksums stop edited migrations | Hand-written row mapping |
-| **Express 4 + `asyncHandler`** | Mature middleware and types; the wrapper covers Express 5's main gain | One wrapper on each async route |
-| **Shared zod package** | Form, API and LLM tool schema cannot drift apart | Shared package must be built before the apps |
+| **The LLM extracts, code decides** | A model cannot book, skip business hours or see another tenant; its mistakes become a wrong question, not a wrong booking | More orchestration code than "let the agent call `book()`" |
+| **Deterministic engine as a first-class provider** | An outage or bad key does not stop bookings; reviewers without a key see the whole flow | A second extractor to maintain; plainer replies |
+| **Guardrails check model output against code** | Fixes failures seen live ("next Wednesday" → a Thursday; "At 5." → closing time) | False positives swap warm wording for a template |
+| **Draft lives in Postgres, not the prompt** | Survives reloads, tabs and provider failover; prompt size stays flat | A merge policy (absent field = "not mentioned", never "cleared") |
+| **`EXCLUDE USING gist` against overlap** | Concurrent requests cannot both commit; a second constraint stops one customer being in two places | Capacity is per service, not per staff member or room |
+| **Composite tenant FKs `(business_id, id)`** | The database refuses rows that point into another tenant | Wider keys; Row Level Security would be the next layer |
+| **httpOnly cookies via a same-origin proxy** | No token in `localStorage`; first-party cookies | The socket needs a JS-readable token, held in memory only |
+| **Plain SQL + small migration runner, no ORM** | The DDL is the deliverable; checksums stop edited migrations | Hand-written row mapping |
 
----
+## Beyond the brief — and why
 
-## Assumptions
+Each extra exists because of a concrete bug or risk. Listed in the order I would cut them if scope were tighter (first to cut at the top); the last three protect correctness and would stay.
 
-- One business is one tenant with **one opening window applied every day** (no closed days or holidays). Bookings sit on a 30-minute grid, and a service's duration sets the end time.
-- A booking is created `confirmed`. There is no approval workflow, reschedule, or no-show handling, only **cancel with a reason**.
-- Self-serve signup either creates a business (you become its owner, it starts with three free starter services and UTC 09:00–17:00) or joins one by its public code (you become a customer). Staff accounts exist only in the seed.
-- Times are entered and shown in the **business's** timezone. The API stores and returns UTC instants.
-- English-language conversation only.
+| Extra | The bug or risk it addresses |
+|---|---|
+| `.ics` export on the booked card | Convenience only: getting the booking into a calendar without email delivery |
+| Interrupted-draft recovery | A session that expired while the booking dialog was open lost everything typed; values are now kept and the dialog reopens after sign-in |
+| Per-tier rate limits (general, auth, refresh, chat, write) | Every chat message can cost a paid model call, and login needs brute-force protection; one shared budget would let chat starve sign-in |
+| Refresh-token rotation with multi-tab grace and abandoned-rotation recovery | Two tabs refreshing at once forced a logout; a refresh response lost to a cold-start timeout looked like token theft and revoked every session |
+| Idempotency keys on `POST /api/appointments` | A retried booking whose response was lost got `409 CUSTOMER_BUSY` for the booking it had just made |
+| Per-conversation turn queue | Rapid messages raced: "whitening" then "at 3pm" lost the service, and two "yes"es raced to book |
+| Guardrails | Live-model failures: wrong weekday, "At 5." stored as 17:00, "Can you confirm the price first?" taken as consent, off-topic questions answered |
+| Deterministic fallback engine | Without it, any Mistral outage, 429 or bad key means no bookings at all |
 
-## Known limitations
+## Assumptions and known limitations
 
-These are deliberate scope cuts, each checked against the code:
+**Assumptions**
 
-- **Route protection is client-side** (`AuthGuard`). The refresh cookie is scoped to `/api/auth`, so Next.js middleware cannot see it. Protected pages' JavaScript loads before the check, but no data is exposed, because every API call is authorized on the server.
-- **Rate limiting is in-memory, per instance.** With more than one replica, each instance has its own budget (the fix is a Redis store). Unauthenticated limiters key by IP, which depends on `TRUST_PROXY_HOPS` matching the real proxy chain. `2` is the assumed Vercel → Render chain and must be checked on the deployed stack (see [docs/deployment.md](docs/deployment.md#rate-limiting-behind-the-proxy)). The API must also be reachable only through the proxy, or a spoofed `X-Forwarded-For` lets a client pick its own key.
-- **Access JWTs stay valid until they expire (15 min) after logout.** Logout revokes the refresh token, clears cookies and disconnects the user's sockets, but there is no denylist for access tokens on REST calls.
-- **No cursor pagination.** Appointment lists cap at 100 (`limit`), the session sidebar at 30, and transcripts load the newest 200 messages.
-- **Capacity is one chair per service.** Two customers can book two different services at the same time (one customer can never be double-booked). There is no staff or room model.
-- **No status transitions beyond cancel.** `completed` and `no_show` are reserved for a staff endpoint that does not exist yet, so past bookings stay `confirmed`. Staff cannot book on a customer's behalf.
-- **Login without a business code** picks the oldest account if an email exists in several tenants, and the login form has no business-code field.
-- **No email verification, password reset or tenant settings UI** (hours, open weekdays and timezone are seed or DB values). No holiday/one-off closures.
-- **No rescheduling.** Cancel and book again; there is no atomic move.
-- **AI:** dates, times and services from the model are cross-checked against the user's own words, and ambiguous input ("at 5", "03/04") is clarified rather than guessed, but the checks are rule-based: a model that correctly infers a service from a description ("my teeth are yellow") is asked to let the user pick. There is no circuit breaker, and the per-conversation turn queue is per process (database locks remain the backstop across instances).
-- **Ops:** migrations run in Render's `startCommand` (fine for one instance). Expired refresh tokens are never swept, although the index for that job exists. The production CSP allows `'unsafe-inline'` scripts (a Next.js limitation without nonces).
+- One business is one tenant with one opening window on its open weekdays (all seven by default), no holidays. Bookings sit on a 30-minute grid; the service's duration sets the end time.
+- A booking is created `confirmed`; the only transition is **cancel with a reason**. No approvals, rescheduling or no-shows.
+- Self-serve signup either joins a business by its code (as a customer) or creates one (as its owner, with three starter services and UTC 09:00–17:00). Staff accounts exist only in the seed.
+- Times are entered and shown in the **business's** timezone; the API stores and returns UTC instants. English only.
+
+**Known limitations** (deliberate scope cuts)
+
+- **Route protection is client-side** (`AuthGuard`): the refresh cookie is scoped to `/api/auth`, so Next.js middleware cannot see it. No data is exposed, because every API call is authorized on the server.
+- **Rate limits and the turn queue are in-memory, per instance.** More than one replica needs Redis (and the Socket.IO Redis adapter); database locks and constraints remain the backstop. IP-keyed limiters depend on `TRUST_PROXY_HOPS` matching the real proxy chain ([deployment.md](docs/deployment.md#rate-limiting-behind-the-proxy)).
+- **Access JWTs stay valid until expiry (15 min) after logout** on REST calls; logout revokes the refresh token and disconnects sockets.
+- **No pagination:** appointment lists cap at 100, the session sidebar at 30, transcripts at the newest 200 messages.
+- **Capacity is one chair per service.** No staff or room model; staff cannot book on a customer's behalf.
+- **Login without a business code** picks the oldest account when an email exists in several tenants.
+- **No email verification, password reset, rescheduling or tenant settings UI** (hours, open days and timezone are seed or SQL values).
+- **AI checks are rule-based:** a model that correctly infers a service from a description ("my teeth are yellow") is asked to let the user pick. No circuit breaker.
+- **Ops:** migrations run in Render's `startCommand` (fine for one instance); expired refresh tokens and idempotency keys are never swept (the indexes for it exist); the production CSP allows `'unsafe-inline'` scripts (Next.js without nonces).
 
 ## What I'd do next
 
-1. Redis for rate limits and the Socket.IO adapter, so the API can scale horizontally.
+1. Redis for rate limits, the turn queue and the Socket.IO adapter, so the API scales horizontally.
 2. Row Level Security keyed on `business_id`, on top of the composite FKs.
-3. A resources model (staff/rooms), per-day hours and one-off closures. The EXCLUDE constraint moves to `(resource_id, slot)`.
-4. Keyset pagination for appointments and transcripts (the indexes already support it).
-5. An offline eval set from `ai_interaction_logs` + `chat_messages.tool_calls`, scored on extraction accuracy and guardrail hit rates.
-6. A scheduled job to sweep expired refresh tokens and partition AI logs by month.
-7. Reschedule flow, email confirmations with the `.ics` already generated client-side, and a tenant settings page.
+3. A resources model (staff/rooms), per-day hours and closures; the EXCLUDE constraint moves to `(resource_id, slot)`.
+4. An offline eval set from `ai_interaction_logs` + `chat_messages.tool_calls`, scored on extraction accuracy and guardrail hit rates.
+5. Keyset pagination, a sweep job for expired tokens and keys, monthly partitions for AI logs.
+6. Rescheduling, email confirmations with the `.ics` attached, and a tenant settings page.
 
 ## Documentation
 
 | Doc | Contents |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Components, boundaries, request lifecycle, middleware order, realtime, multi-tenancy |
-| [docs/api.md](docs/api.md) | Every endpoint, schemas, errors, curl examples, socket events |
-| [docs/database.md](docs/database.md) | ER diagram, constraints, index-to-query map, performance, migrations |
-| [docs/ai-integration.md](docs/ai-integration.md) | Provider seam, prompt, tool schema, memory, guardrails, fallback, logging, failure modes |
-| [docs/frontend.md](docs/frontend.md) | Structure, state, API client and refresh, async/error UX, a11y, responsive |
-| [docs/decisions.md](docs/decisions.md) | ADRs |
-| [docs/deployment.md](docs/deployment.md) | Neon + Render + Vercel, step by step |
-| [docs/demo-script.md](docs/demo-script.md) | 4–5 minute video script |
-| [docs/assessment-checklist.md](docs/assessment-checklist.md) | Every requirement → status → evidence |
-| [docs/verification-matrix.md](docs/verification-matrix.md) | Every use case and edge case → status → the test that proves it |
+| [architecture.md](docs/architecture.md) | Components, service boundaries, middleware order, auth flow, realtime, multi-tenancy, time |
+| [api.md](docs/api.md) | Every endpoint, schemas, errors, rate-limit tiers, socket events, curl examples |
+| [database.md](docs/database.md) | ER diagram, constraints, index-to-query map, performance, migrations |
+| [ai-integration.md](docs/ai-integration.md) | Provider seam, prompt, tool schema, memory, guardrails, fallback, logging, failure modes |
+| [frontend.md](docs/frontend.md) | Structure, state, API client and refresh, async/error UX, accessibility, responsive |
+| [decisions.md](docs/decisions.md) | Ten ADRs, plus minor decisions |
+| [configuration.md](docs/configuration.md) | Every environment variable |
+| [testing.md](docs/testing.md) | Test suites, how the e2e stack is built, counts, CI |
+| [deployment.md](docs/deployment.md) | Neon + Render + Vercel, step by step |
+| [verification-matrix.md](docs/verification-matrix.md) | Every brief requirement and edge case → status → evidence |
+| [demo-script.md](docs/demo-script.md) | 4–5 minute video script |
 
 ## License
 

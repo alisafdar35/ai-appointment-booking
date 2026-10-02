@@ -25,7 +25,7 @@ export const COMPLETE_DRAFT: BookingSlots = {
   notes: null,
 };
 
-/** A stored message. `action` defaults to null: what user messages and legacy assistant rows carry. */
+/** A stored message. `action` defaults to null, as for a user message. */
 export function message(overrides: Partial<ChatMessageDto> & Pick<ChatMessageDto, 'id' | 'role'>): ChatMessageDto {
   return {
     content: `${overrides.role} ${overrides.id}`,

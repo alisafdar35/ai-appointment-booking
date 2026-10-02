@@ -8,6 +8,7 @@ import {
   type ChatMessageDto,
   type ChatSessionDto,
   type ChatSessionStatus,
+  type ClarificationDto,
 } from '@appt/shared';
 
 /**
@@ -53,10 +54,11 @@ export interface ChatItem {
   role: 'user' | 'assistant';
   content: string;
   engine: AiEngine | null;
-  /** What the server decided the UI should offer with this reply. Null for user messages and legacy rows. */
+  /** What the server decided the UI should offer with this reply. Null for user messages. */
   action: AssistantAction | null;
   suggestions?: BookingSuggestion[];
-  /** The draft after this reply, as recorded with it. Absent for user messages and older rows. */
+  clarification?: ClarificationDto;
+  /** The draft after this reply, as recorded with it. Absent for user messages. */
   draft?: BookingSlots;
   /** For a 'booked' reply: the appointment it created. */
   appointmentId?: string;
@@ -66,7 +68,10 @@ export interface ChatItem {
 }
 
 /** What the UI renders from an assistant turn. */
-export type TurnMeta = Pick<AssistantTurnDto, 'action' | 'missing' | 'suggestions' | 'appointment' | 'bookingDraft'>;
+export type TurnMeta = Pick<
+  AssistantTurnDto,
+  'action' | 'missing' | 'suggestions' | 'clarification' | 'appointment' | 'bookingDraft'
+>;
 
 export interface SessionState {
   items: ChatItem[];
@@ -127,6 +132,7 @@ const serverItem = (message: ChatMessageDto, role: Speaker): ChatItem => ({
   engine: message.engine,
   action: message.action,
   suggestions: message.suggestions,
+  clarification: message.clarification,
   draft: message.draft,
   appointmentId: message.appointmentId,
   createdAt: message.createdAt,
@@ -141,6 +147,7 @@ const confirmedBy = (item: ChatItem, message: ChatMessageDto): ChatItem => ({
   engine: message.engine,
   action: message.action,
   suggestions: message.suggestions,
+  clarification: message.clarification,
   draft: message.draft,
   appointmentId: message.appointmentId,
   createdAt: message.createdAt,
@@ -252,6 +259,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             action: turn.action,
             missing: turn.missing,
             suggestions: turn.suggestions,
+            clarification: turn.clarification,
             appointment: turn.appointment,
             bookingDraft: turn.bookingDraft,
           },

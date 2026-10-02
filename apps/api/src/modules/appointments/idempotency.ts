@@ -3,7 +3,7 @@ import type { CreateAppointmentInput } from '@appt/shared';
 import type { Queryable } from '../../db/pool.js';
 
 /**
- * Idempotency-Key storage for POST /api/appointments (migration 008).
+ * Idempotency-Key storage for POST /api/appointments (table idempotency_keys).
  *
  * Every function runs on the booking transaction's client: the claim, the
  * booking and the stored response commit or roll back together, so a key is

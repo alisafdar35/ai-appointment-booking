@@ -1,64 +1,26 @@
-import { mergeSlots, type BookingSlots } from '@appt/shared';
+import { isBookingComplete, mergeSlots, type BookingSlots } from '@appt/shared';
+import { answerAboutService, composeReply, offTopicPrompt } from './copy.js';
 import {
-  answerAboutService,
-  composeReply,
   findClarification,
   isAffirmative,
   lastUserMessage,
   matchService,
   negates,
+  overridesInstructions,
   readDate,
   readTime,
   withoutClarified,
-} from './fallback.js';
+} from './parse.js';
 import type { ProviderInput, ProviderOutput } from './provider.js';
 
 /**
- * Post-checks on a model answer that parsed cleanly.
+ * Policy checks on a model answer that parsed cleanly: schema validation
+ * (tools.ts) catches a malformed answer, these catch a well-formed wrong one.
+ * Each rule exists because of a failure seen against the live model; the
+ * table in docs/ai-integration.md#guardrails lists them with that failure.
  *
- * Schema validation (tools.ts) catches an answer that is malformed. These catch
- * one that is well-formed and wrong — both seen against the live model:
- *
- *   1. Calendar arithmetic. Asked on a Friday for "next Wednesday", the model
- *      answered 2026-10-08, a Thursday. Resolving a weekday against today's
- *      date is exactly what code is reliable at and language models are not,
- *      so when chrono confidently reads a date from the same message and the
- *      model's differs or is missing, chrono wins. Only chrono's certain readings count:
- *      "the 12th" needs the month from earlier in the conversation, which the
- *      model has and the parser does not, so there the model is not overruled.
- *
- *   2. Clock times, by the same rule. When the latest message settles a time
- *      on its own ("3pm", "15:30", "afternoon around 3", or "at 3" where only
- *      3 PM is inside opening hours), that reading wins over a different or
- *      missing one from the model.
- *
- *   2a. Ambiguity. Asked "At 5." the model stored 17:00 — closing time — and
- *      showed it for confirmation. When the message itself has two readings
- *      (an hour neither or both of whose AM/PM readings can be booked, "03/04",
- *      "Friday" said on a Friday), the model's pick is dropped, the field is
- *      reopened, and the reply is the code-composed question the fallback asks.
- *
- *   2b. Consent. `confirming` is honoured only when the message is plain
- *      agreement by the fallback's own test, so "don't book anything yet" can
- *      never reach the booking call whatever intent the model reports.
- *
- *   3. Services nobody asked for. Asked "whenever" for a day, the model
- *      answered with serviceName "Routine Checkup" — a service the user had
- *      never named. A model-supplied service is kept only when it is grounded:
- *      already in the draft, or named (by the fallback's own matcher) in a
- *      user message the model was shown. Otherwise the draft keeps its
- *      previous value and the reply is the code-composed question, which asks
- *      for the service instead of talking as if one were chosen.
- *
- *   4. Prose that contradicts the facts. The reply is shown verbatim while
- *      details are still being collected, so a sentence claiming the booking
- *      is done, or naming a day other than the one in the draft, would mislead
- *      the user even though the stored draft is right. Such a reply is swapped
- *      for the code-composed question, which is built from the draft and so
- *      cannot disagree with it.
- *
- * Both checks lean towards replacing: a false positive costs some warmth of
- * wording, a false negative tells someone they have an appointment they do not.
+ * They lean towards replacing: a false positive costs some warmth of wording,
+ * a false negative tells someone they have an appointment they do not.
  */
 
 export type GuardrailEvent =
@@ -68,6 +30,7 @@ export type GuardrailEvent =
   | { kind: 'service_filled'; deterministic: string }
   | { kind: 'clarification_asked'; fields: ('date' | 'time')[]; model: Partial<BookingSlots> }
   | { kind: 'consent_unsupported' }
+  | { kind: 'off_topic'; reply: string }
   | { kind: 'reply_replaced'; reason: 'booking_claim' | 'date_mismatch' | 'time_mismatch' | 'filled_in'; reply: string };
 
 /**
@@ -106,9 +69,23 @@ export function applyGuardrails(
   const events: GuardrailEvent[] = [];
   let { slots, reply, intent } = output;
   const latest = lastUserMessage(input);
+
+  // Off topic: the model's prose is never shown, so an answer cannot leak
+  // (seen live: "ignore your instructions… capital of France?" was answered).
+  // A price or length question misfiled here is still answered from the catalogue.
+  if (intent === 'off_topic' || overridesInstructions(latest)) {
+    events.push({ kind: 'off_topic', reply });
+    const asked = input.draft.serviceName ?? matchService(latest, input.services.map((s) => s.name));
+    const aside = answerAboutService(latest, asked, input.services) ?? offTopicPrompt(input.businessName);
+    const next = isBookingComplete(input.draft) ? '' : ` ${composeReply(input.draft, input)}`;
+    return { output: { ...output, slots: {}, intent: 'other', reply: `${aside}${next}` }, events };
+  }
+
   const clarification = findClarification(latest, input);
   const reopened = new Set(clarification?.fields);
 
+  // Calendar arithmetic is code's job: chrono's certain reading of the latest
+  // message wins (seen live: "next Wednesday" came back as a Thursday).
   // A date or time the model left out is filled in too: the user's own
   // "Monday" or "3pm" is not context the model could know better, and leaving
   // it out would ask again (seen live: "a haircut on Monday at 11am" came back
@@ -163,7 +140,14 @@ export function applyGuardrails(
     slots = Object.fromEntries(Object.entries(slots).filter(([key]) => !reopened.has(key as 'date' | 'time')));
     const draft = withoutClarified(mergeSlots(input.draft, slots), clarification);
     return {
-      output: { ...output, slots, intent, reply: composeReply(draft, input, clarification), clarify: clarification.fields },
+      output: {
+        ...output,
+        slots,
+        intent,
+        reply: composeReply(draft, input, clarification),
+        clarify: clarification.fields,
+        ...(clarification.choice ? { clarification: clarification.choice } : {}),
+      },
       events,
     };
   }

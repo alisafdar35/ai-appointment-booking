@@ -99,7 +99,7 @@ export function pgConstraint(e: unknown): string | undefined {
 }
 
 /**
- * The appointments EXCLUDE constraints (migrations 001 and 005). Both raise
+ * The appointments EXCLUDE constraints (db/migrations/001_schema.sql). Both raise
  * 23P01, and they mean different things to the user: someone else holds the
  * slot, or the user already has a booking at that time.
  */
@@ -108,5 +108,5 @@ export const OVERLAP_CONSTRAINTS = {
   CUSTOMER: 'appointments_customer_no_overlap',
 } as const;
 
-/** The unique index (migration 009) allowing one live appointment per conversation. */
+/** The partial unique index allowing one live appointment per conversation. */
 export const CHAT_SESSION_BOOKING_INDEX = 'appointments_one_live_per_chat_session';

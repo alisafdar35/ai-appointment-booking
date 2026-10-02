@@ -4,7 +4,7 @@ import { DEMO_ACCOUNT } from '@/features/auth/demo-account';
 import { ROUTES } from '@/lib/routes';
 
 /**
- * Points reviewers at the seeded account. The button goes to /login, where
+ * Points visitors at the seeded demo account. The button goes to /login, where
  * "Use demo account" fills the form: credentials are shown here only so they
  * can be read, never auto-submitted.
  */

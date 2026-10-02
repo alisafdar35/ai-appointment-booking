@@ -10,15 +10,10 @@ export interface QuickReply {
   message: string;
 }
 
-/** Wall-clock times offered when only the time is missing, kept inside ordinary working hours. */
-const TIME_CHOICES: readonly number[] = [9, 11, 14, 16];
-
 const MAX_CHIPS = 4;
 
-const hourMessage = (hour: number) => `${hour % 12 || 12}${hour >= 12 ? 'pm' : 'am'}`;
-
 interface QuickReplyContext {
-  meta: Pick<TurnMeta, 'action' | 'missing' | 'suggestions'>;
+  meta: Pick<TurnMeta, 'action' | 'missing' | 'suggestions' | 'clarification'>;
   draft: BookingSlots;
   services: readonly ServiceDto[];
   /** "YYYY-MM-DD" today in the business timezone; every relative day is computed from it. */
@@ -38,7 +33,18 @@ interface QuickReplyContext {
 export function deriveQuickReplies({ meta, draft, services, today, timeZone }: QuickReplyContext): QuickReply[] {
   if (meta.action !== 'collect_info') return [];
 
-  // A taken slot comes with alternatives; they beat any generic suggestion.
+  // A clarifying question is answered with its own readings, nothing else.
+  if (meta.clarification) {
+    const { field, options } = meta.clarification;
+    return options.map((value) =>
+      field === 'date'
+        ? { id: `date-${value}`, label: formatDate(value, timeZone, 'short'), message: formatDate(value, timeZone, 'medium') }
+        : { id: `time-${value}`, label: to12Hour(value), message: to12Hour(value) },
+    );
+  }
+
+  // Real free times from the server: alternatives to a refused slot, or the
+  // first open times on the chosen day. Times are never invented here.
   if (meta.suggestions?.length) {
     return meta.suggestions.slice(0, MAX_CHIPS).map(({ date, time }) => ({
       id: `slot-${date}-${time}`,
@@ -73,14 +79,6 @@ export function deriveQuickReplies({ meta, draft, services, today, timeZone }: Q
         message: offset === 1 ? 'tomorrow' : formatDate(date, timeZone, 'medium'),
       };
     });
-  }
-
-  if (missing.includes('time')) {
-    return TIME_CHOICES.map((hour) => ({
-      id: `time-${hour}`,
-      label: to12Hour(`${String(hour).padStart(2, '0')}:00`),
-      message: hourMessage(hour),
-    }));
   }
 
   return [];

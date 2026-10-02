@@ -1,9 +1,10 @@
 import type { UseFormRegisterReturn } from 'react-hook-form';
 import type { BusinessMode } from './signup-schema';
 
+// Join first: most people signing up are customers of a business already on Slotly.
 const OPTIONS: { value: BusinessMode; label: string }[] = [
-  { value: 'create', label: 'Create a new business' },
   { value: 'join', label: 'Join an existing business' },
+  { value: 'create', label: 'Create a new business' },
 ];
 
 /**

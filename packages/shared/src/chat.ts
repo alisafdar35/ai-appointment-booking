@@ -46,21 +46,30 @@ export interface ChatMessageDto {
   /**
    * What the UI should offer alongside this assistant message, as decided when
    * it was sent — so a reloaded transcript can restore the confirmation card or
-   * the suggested times. Null for user messages and for messages stored before
-   * this was recorded.
+   * the suggested times. Null for user messages.
    */
   action: AssistantAction | null;
   suggestions?: BookingSuggestion[];
+  clarification?: ClarificationDto;
   /**
    * The booking draft as it stood after this turn, so an older confirmation or
    * receipt is rebuilt from its own details rather than from the session's
-   * latest draft. Absent for user messages and messages stored before it was
-   * recorded.
+   * latest draft. Absent for user messages.
    */
   draft?: BookingSlots;
   /** The appointment a 'booked' turn created; its row is in the transcript's `appointments`. */
   appointmentId?: string;
   createdAt: string;
+}
+
+/**
+ * The one question a turn asked about a detail said two ways ("03/04", "at 9"
+ * for a business open 8–22), with the readings to offer as answers: ISO dates
+ * for `date`, HH:MM for `time`.
+ */
+export interface ClarificationDto {
+  field: 'date' | 'time';
+  options: string[];
 }
 
 export interface ChatSessionDto {
@@ -113,8 +122,13 @@ export interface AssistantTurnDto {
   missing: RequiredSlot[];
   /** Populated when action === 'booked'. */
   appointment?: AppointmentDto;
-  /** Suggested times when the requested slot was taken. */
+  /**
+   * Free times to pick from: alternatives to a refused slot, or the first free
+   * times on the chosen day when only the time is missing.
+   */
   suggestions?: BookingSuggestion[];
+  /** Present when the reply asks which of two readings the user meant. */
+  clarification?: ClarificationDto;
   engine: AiEngine;
 }
 

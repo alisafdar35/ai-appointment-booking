@@ -23,6 +23,9 @@ test.describe('signing up', () => {
     await page.getByLabel('Email').fill(account.email);
     await page.getByLabel(/^Password/).first().fill(account.password);
     await expect(page.getByRole('status').filter({ hasText: 'All password requirements met' })).toBeAttached();
+    // Joining is the default; creating a business is one click away.
+    await expect(page.getByRole('radio', { name: 'Join an existing business' })).toBeChecked();
+    await page.getByText('Create a new business').click();
     await page.getByLabel('Business name').fill('Harborview Physio');
     await page.getByRole('button', { name: 'Create account' }).click();
 

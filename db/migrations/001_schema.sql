@@ -1,16 +1,19 @@
 -- =============================================================================
--- 001_init.sql — core schema
+-- 001_schema.sql — tables, types and integrity rules
+--
+-- Squashed before the first production data existed; from here on, changes
+-- are new numbered migrations (applied files are checksummed and immutable).
 --
 -- Design notes (expanded in docs/database.md):
 --  * Multi-tenant from day one: every tenant-scoped row carries business_id.
---    Cross-row references use COMPOSITE foreign keys on (business_id, id) so the
---    database itself makes it impossible to attach a row to the wrong tenant —
---    a guarantee application code can forget to make, but SQL cannot.
---  * Native ENUMs are used for stable value sets. Tradeoff: adding a value is a
---    cheap ALTER TYPE, but renaming/removing one needs a migration dance. These
---    sets are stable enough that DB-level type safety is the better trade.
---  * Appointment overlap is prevented by an EXCLUDE constraint, not app logic.
---    Two concurrent bookings for the same slot cannot both commit.
+--    Cross-row references use COMPOSITE foreign keys on (business_id, id), so
+--    the database itself refuses a row that points into another tenant.
+--  * Native ENUMs for stable value sets: adding a value is a cheap ALTER TYPE,
+--    renaming/removing one needs a migration. Worth it for DB-level typing.
+--  * Double-booking is prevented by EXCLUDE constraints, not app logic: two
+--    concurrent bookings for the same slot cannot both commit.
+--  * Columns added late in development sit at the end of their tables
+--    (open_days, meta, guardrails, abandoned), matching the pre-squash layout.
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS btree_gist;  -- GIST support for scalar =, needed by EXCLUDE below
@@ -49,12 +52,22 @@ CREATE TABLE businesses (
   closes_at   time        NOT NULL DEFAULT '17:00',
   created_at  timestamptz NOT NULL DEFAULT now(),
   updated_at  timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT businesses_hours_ordered CHECK (closes_at > opens_at)
+  -- ISO weekdays (1 = Monday .. 7 = Sunday) the business takes bookings, read
+  -- as calendar days in its own timezone, so DST and the client's zone never
+  -- change which weekday a local date is. Default: every day.
+  open_days   smallint[]  NOT NULL DEFAULT '{1,2,3,4,5,6,7}',
+  CONSTRAINT businesses_hours_ordered CHECK (closes_at > opens_at),
+  CONSTRAINT businesses_open_days_valid CHECK (
+    cardinality(open_days) BETWEEN 1 AND 7
+    AND open_days <@ '{1,2,3,4,5,6,7}'::smallint[]
+  )
 );
 CREATE TRIGGER businesses_set_updated_at BEFORE UPDATE ON businesses
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 COMMENT ON TABLE businesses IS 'Tenant root. Every tenant-scoped table references this via business_id.';
+COMMENT ON COLUMN businesses.open_days IS
+  'ISO weekdays (1 = Monday .. 7 = Sunday) the business takes bookings, in its own timezone.';
 
 -- ---------------------------------------------------------------------------
 -- users — authentication + profile
@@ -96,11 +109,17 @@ CREATE TABLE refresh_tokens (
   replaced_by uuid        REFERENCES refresh_tokens(id) ON DELETE SET NULL,
   user_agent  text,
   created_at  timestamptz NOT NULL DEFAULT now(),
+  -- A successor revoked because its rotation response never reached the
+  -- browser. Presented later, it is superseded, never recovered again —
+  -- otherwise it could take over its own replacement.
+  abandoned   boolean     NOT NULL DEFAULT false,
   CONSTRAINT refresh_tokens_expiry_future CHECK (expires_at > created_at)
 );
 
 COMMENT ON TABLE refresh_tokens IS
   'Rotating refresh tokens. Reuse of a revoked token revokes every live token for that user.';
+COMMENT ON COLUMN refresh_tokens.abandoned IS
+  'Revoked as the unused successor of an abandoned rotation; presenting it again is superseded, never recovered.';
 
 -- ---------------------------------------------------------------------------
 -- services — what can actually be booked
@@ -145,9 +164,9 @@ CREATE TABLE appointments (
   notes       text CHECK (notes IS NULL OR length(notes) <= 2000),
   cancellation_reason text CHECK (cancellation_reason IS NULL OR length(cancellation_reason) <= 500),
 
-  -- Provenance: which conversation produced this booking. Nullable because
-  -- form bookings have no session. ON DELETE SET NULL — losing chat history
-  -- must never delete a real appointment.
+  -- Provenance: which conversation produced this booking. NULL for bookings
+  -- made outside a conversation. The FK (below, once chat_sessions exists) is SET NULL: losing
+  -- chat history must never delete a real appointment.
   chat_session_id uuid,
 
   created_at  timestamptz NOT NULL DEFAULT now(),
@@ -161,11 +180,20 @@ CREATE TABLE appointments (
   CONSTRAINT appointments_service_fk FOREIGN KEY (business_id, service_id)
     REFERENCES services (business_id, id) ON DELETE RESTRICT,
 
-  -- Integrity, enforced by the database rather than by a read-then-write race:
-  -- no two live appointments for the same service may overlap in time.
+  -- Each service is one bookable resource (one chair per service): no two live
+  -- appointments for it may overlap. Different services may run concurrently.
   CONSTRAINT appointments_no_overlap EXCLUDE USING gist (
     business_id WITH =,
     service_id  WITH =,
+    slot        WITH &&
+  ) WHERE (status IN ('pending', 'confirmed')),
+
+  -- ...but one customer cannot attend two overlapping bookings, whichever
+  -- services they are for. Same live-status predicate: a cancelled or
+  -- completed booking blocks nothing.
+  CONSTRAINT appointments_customer_no_overlap EXCLUDE USING gist (
+    business_id WITH =,
+    user_id     WITH =,
     slot        WITH &&
   ) WHERE (status IN ('pending', 'confirmed'))
 );
@@ -173,7 +201,9 @@ CREATE TRIGGER appointments_set_updated_at BEFORE UPDATE ON appointments
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 COMMENT ON CONSTRAINT appointments_no_overlap ON appointments IS
-  'Double-booking is a data integrity problem, so it is solved in the schema. Cancelled/completed rows are excluded so a freed slot is immediately rebookable.';
+  'One resource per service: no two live appointments for the same service may overlap. Different services may run concurrently.';
+COMMENT ON CONSTRAINT appointments_customer_no_overlap ON appointments IS
+  'A customer cannot hold two live appointments at the same time, whichever services they are for.';
 
 -- ---------------------------------------------------------------------------
 -- chat_sessions — one conversation; carries the AI booking draft
@@ -203,10 +233,26 @@ CREATE TABLE chat_sessions (
 CREATE TRIGGER chat_sessions_set_updated_at BEFORE UPDATE ON chat_sessions
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
--- Deferred to here because chat_sessions is defined after appointments.
+-- Composite like every other cross-row reference, so an appointment cannot be
+-- attached to another tenant's conversation. SET NULL names the column: a bare
+-- SET NULL would also null business_id (NOT NULL). Column-list SET NULL needs
+-- PostgreSQL 15+. A NULL chat_session_id is not checked.
 ALTER TABLE appointments
-  ADD CONSTRAINT appointments_chat_session_fk FOREIGN KEY (chat_session_id)
-  REFERENCES chat_sessions (id) ON DELETE SET NULL;
+  ADD CONSTRAINT appointments_chat_session_fk
+  FOREIGN KEY (business_id, chat_session_id)
+  REFERENCES chat_sessions (business_id, id)
+  ON DELETE SET NULL (chat_session_id);
+
+-- A conversation books at most one appointment. The API guarantees it with a
+-- chat_sessions row lock (SELECT ... FOR UPDATE) in every booking that links a
+-- session; this partial unique index is the backstop for any writer that
+-- skips the lock. "Live" is the same predicate the EXCLUDE constraints use.
+CREATE UNIQUE INDEX appointments_one_live_per_chat_session
+  ON appointments (chat_session_id)
+  WHERE chat_session_id IS NOT NULL AND status IN ('pending', 'confirmed');
+
+COMMENT ON INDEX appointments_one_live_per_chat_session IS
+  'A conversation holds at most one live appointment; backs the chat_sessions row lock taken by every booking that links one.';
 
 -- ---------------------------------------------------------------------------
 -- chat_messages — the transcript
@@ -220,13 +266,20 @@ CREATE TABLE chat_messages (
   -- Structured slots the model extracted on this turn, kept for debugging and
   -- for replaying a conversation without re-calling the provider.
   tool_calls jsonb CHECK (tool_calls IS NULL OR jsonb_typeof(tool_calls) = 'array'),
-  -- Which engine produced an assistant turn: 'mistral' | 'fallback' | NULL for user turns.
-  engine     text CHECK (engine IS NULL OR engine IN ('mistral', 'fallback')),
-  created_at timestamptz NOT NULL DEFAULT now()
+  -- 'system' = produced with no language understanding at all (the structured
+  -- form); labelling those 'fallback' would claim the AI had degraded.
+  engine     text CHECK (engine IS NULL OR engine IN ('mistral', 'fallback', 'system')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  -- The outcome of an assistant turn ({action, suggestions?, missing}), so a
+  -- reloaded transcript restores the card/chips the turn showed live. jsonb:
+  -- read and written whole, never filtered on. NULL for user turns.
+  meta       jsonb CHECK (meta IS NULL OR jsonb_typeof(meta) = 'object')
 );
 
 COMMENT ON COLUMN chat_messages.engine IS
-  'Records whether a reply came from the LLM or the deterministic fallback extractor.';
+  'Who produced an assistant turn: the LLM (mistral), the deterministic extractor (fallback), or plain code with no language understanding (system).';
+COMMENT ON COLUMN chat_messages.meta IS
+  'Assistant turns only: {action, suggestions?, missing}, so a reloaded transcript restores the UI the turn produced.';
 
 -- ---------------------------------------------------------------------------
 -- ai_interaction_logs — observability for every provider call
@@ -241,12 +294,45 @@ CREATE TABLE ai_interaction_logs (
   latency_ms     integer CHECK (latency_ms IS NULL OR latency_ms >= 0),
   prompt_tokens     integer CHECK (prompt_tokens     IS NULL OR prompt_tokens     >= 0),
   completion_tokens integer CHECK (completion_tokens IS NULL OR completion_tokens >= 0),
-  -- 'ok' | 'timeout' | 'rate_limited' | 'invalid_output' | 'provider_error'
   outcome        text NOT NULL,
   error_message  text,
   extracted_slots jsonb,
-  created_at     timestamptz NOT NULL DEFAULT now()
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  -- What the application corrected in a model answer it otherwise accepted
+  -- (a wrongly resolved date, a claimed booking that does not exist). Not an
+  -- outcome: the call succeeded, its answer just could not be taken at its word.
+  guardrails     jsonb CHECK (guardrails IS NULL OR jsonb_typeof(guardrails) = 'array')
 );
 
 COMMENT ON TABLE ai_interaction_logs IS
   'One row per provider call, including failures and fallbacks. Makes AI cost, latency and reliability measurable instead of anecdotal.';
+COMMENT ON COLUMN ai_interaction_logs.outcome IS
+  'ok | timeout | rate_limited | auth_error | invalid_output | provider_error';
+COMMENT ON COLUMN ai_interaction_logs.guardrails IS
+  'Corrections applied to an accepted model answer, e.g. [{"kind":"date_corrected","model":"2026-10-08","deterministic":"2026-10-07"}].';
+
+-- ---------------------------------------------------------------------------
+-- idempotency_keys — replay store for POST /api/appointments
+-- ---------------------------------------------------------------------------
+-- A client whose response was lost (dropped connection, timeout, double click)
+-- resends with the same Idempotency-Key and gets the original booking back.
+-- The PK is the race lock: the booking transaction inserts this row FIRST, so
+-- a concurrent request with the same key blocks until the first commits (and
+-- replays it) or rolls back (and books itself). Only successful bookings
+-- persist. request_hash refuses the same key with different details; response
+-- is the exact 201 body. Keys are honoured 24 h, then taken over on reuse.
+CREATE TABLE idempotency_keys (
+  business_id    uuid        NOT NULL,
+  user_id        uuid        NOT NULL,
+  key            text        NOT NULL CHECK (key ~ '^[\x21-\x7E]{1,255}$'),
+  request_hash   bytea       NOT NULL CHECK (length(request_hash) = 32),
+  appointment_id uuid        REFERENCES appointments (id) ON DELETE CASCADE,
+  response       jsonb       CHECK (response IS NULL OR jsonb_typeof(response) = 'object'),
+  created_at     timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (business_id, user_id, key),
+  CONSTRAINT idempotency_keys_user_fk FOREIGN KEY (business_id, user_id)
+    REFERENCES users (business_id, id) ON DELETE CASCADE
+);
+
+COMMENT ON TABLE idempotency_keys IS
+  'Idempotency-Key replay store for POST /api/appointments. Rows older than 24 h are dead and may be swept.';

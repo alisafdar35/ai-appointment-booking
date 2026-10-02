@@ -11,42 +11,19 @@ import { logger } from '../lib/logger.js';
 import { verifyAccessToken } from '../lib/jwt.js';
 
 /**
- * Real-time delivery.
+ * Real-time delivery, as an enhancement: every feature works over REST, and a
+ * socket that cannot connect shows a degraded badge rather than a broken chat.
  *
- * ---------------------------------------------------------------------------
- * Socket.IO as an enhancement, not a dependency
- * ---------------------------------------------------------------------------
- * Every feature works over plain REST. The socket adds live typing indicators
- * and pushes updates to a user's other open tabs. If it fails to connect — a
- * proxy that will not upgrade, a blocked port, a flaky network — the UI shows a
- * degraded badge and keeps working. Building it the other way round, with the
- * chat only functioning over a websocket, would make a transport problem look
- * like a broken product.
+ * Rooms: each socket joins `user:<id>` (events matter across a user's whole
+ * session list, and the server never tracks which tab shows what). Staff and
+ * owners also join `business:<id>` for the tenant dashboard. Membership comes
+ * from the verified token's role, never from the client, and nothing
+ * broadcasts to everyone.
  *
- * ---------------------------------------------------------------------------
- * Rooms, and why one per user rather than per session
- * ---------------------------------------------------------------------------
- * Each socket joins a room named for its authenticated user id. Appointment
- * events are relevant across a user's whole session list, not just the
- * conversation they happen to have open, and a per-user room means the server
- * never has to track which tab is looking at what.
- *
- * Staff and owners also join `business:<id>`, because their dashboard lists the
- * whole tenant's bookings and must hear about a customer's new one. Membership
- * is decided from the role in the verified access token, never from anything
- * the client asks for, so a customer's socket is never in a tenant room and
- * cannot see another customer's events. Assistant turns go to `user:<id>` only.
- * There is no code path that broadcasts to everyone.
- *
- * ---------------------------------------------------------------------------
- * Socket lifetime is bounded by the access token
- * ---------------------------------------------------------------------------
- * The token is checked once, at the handshake. So that a socket cannot outlive
- * the credential that opened it, the server disconnects it when that token
- * expires, and the client reconnects with a fresh one; and when every session
- * of a user is revoked (logout everywhere, refresh-token replay) their sockets
- * are dropped at once. An access token itself stays valid until it expires (15
- * minutes by default): that window is the accepted cost of stateless JWTs.
+ * Lifetime: the token is checked at the handshake, so the server disconnects a
+ * socket when that token expires and drops all of a user's sockets when their
+ * sessions are revoked. The up-to-15-minute access-token window is the
+ * accepted cost of stateless JWTs.
  */
 
 let io: Server | null = null;

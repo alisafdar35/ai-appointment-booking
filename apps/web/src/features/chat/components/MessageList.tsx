@@ -27,7 +27,7 @@ export function MessageList({ items, context, services, timeZone, actions, onRet
 
   const viewOf = (item: ChatItem): MessageView => {
     const live = item.key === liveKey;
-    return { item, live, meta: turnMetaFor(item, live, context) };
+    return { item, live, meta: turnMetaFor(item, context) };
   };
 
   return (

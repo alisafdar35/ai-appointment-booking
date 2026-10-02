@@ -81,8 +81,8 @@ describe('AppointmentsDashboard list', () => {
     renderWithProviders(<AppointmentsDashboard />);
 
     await screen.findByText('The server had a problem.');
-    const tiles = screen.getByLabelText('Appointment summary');
-    expect(within(tiles).getAllByText('Unavailable')).toHaveLength(3);
+    const summary = screen.getByRole('region', { name: 'Next appointment' });
+    expect(within(summary).getByText('Unavailable')).toBeInTheDocument();
   });
 
   it('renders each appointment as an article with its details in the business timezone', async () => {
@@ -97,19 +97,28 @@ describe('AppointmentsDashboard list', () => {
     expect(within(card).getByText(/^\(in .*\)$/)).toBeInTheDocument();
   });
 
-  it('summarises the lists in the tiles and tab counts', async () => {
+  it('counts the lists on the tabs, and shows the next appointment once above them', async () => {
     renderWithProviders(<AppointmentsDashboard />);
 
     expect(await tab(/^Upcoming\s*1$/)).toBeInTheDocument();
     expect(await tab(/^Past\s*1$/)).toBeInTheDocument();
     expect(await tab(/^Cancelled\s*1$/)).toBeInTheDocument();
 
-    const tiles = screen.getByLabelText('Appointment summary');
-    expect(within(tiles).getByText(/^\w{3}, Oct 5 · 2:00 PM$/)).toBeInTheDocument();
-    expect(within(tiles).getByText(/^Routine Checkup · in /)).toBeInTheDocument();
+    const summary = screen.getByRole('region', { name: 'Next appointment' });
+    expect(within(summary).getByText(/^\w{3}, Oct 5 · 2:00 PM$/)).toBeInTheDocument();
+    expect(within(summary).getByText(/^Routine Checkup · in /)).toBeInTheDocument();
+    // The counts are on the tabs only, not repeated in summary tiles.
+    expect(within(summary).queryByText('Upcoming')).not.toBeInTheDocument();
+    expect(within(summary).queryByText('Cancelled')).not.toBeInTheDocument();
   });
 
-  it('marks a count taken from a full page as a lower bound, in the tile as in the tab', async () => {
+  it('says when nothing is scheduled', async () => {
+    server = [];
+    renderWithProviders(<AppointmentsDashboard />);
+    expect(await within(screen.getByRole('region', { name: 'Next appointment' })).findByText('None scheduled')).toBeInTheDocument();
+  });
+
+  it('marks a count taken from a full page as a lower bound on the tab', async () => {
     server = Array.from({ length: 100 }, (_, index) =>
       makeAppointment({
         id: `a0000000-0000-4000-8000-${String(index).padStart(12, '0')}`,
@@ -120,8 +129,6 @@ describe('AppointmentsDashboard list', () => {
     renderWithProviders(<AppointmentsDashboard />);
 
     expect(await tab(/^Upcoming\s*100\+$/)).toBeInTheDocument();
-    const upcomingTile = within(screen.getByLabelText('Appointment summary')).getByText('Upcoming').parentElement!;
-    expect(upcomingTile).toHaveTextContent(/^Upcoming100\+$/);
   });
 
   it('keeps past and cancelled bookings off the upcoming tab, and out of reach of Cancel', async () => {
@@ -185,8 +192,8 @@ describe('AppointmentsDashboard roles', () => {
     expect(within(card).getByText('Casey Customer')).toBeInTheDocument();
     expect(within(card).getByText('casey@example.test')).toBeInTheDocument();
     expect(screen.getByText(/Every booking at Bluewave Dental/)).toBeInTheDocument();
-    // The next-appointment tile names the customer too.
-    expect(within(screen.getByLabelText('Appointment summary')).getByText(/Routine Checkup · Casey Customer · in /)).toBeInTheDocument();
+    // The next-appointment summary names the customer too.
+    expect(within(screen.getByRole('region', { name: 'Next appointment' })).getByText(/Routine Checkup · Casey Customer · in /)).toBeInTheDocument();
   });
 });
 

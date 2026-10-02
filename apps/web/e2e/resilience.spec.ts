@@ -78,7 +78,7 @@ test('the dashboard explains a failed load, stops its loading state, and recover
   const alert = page.getByRole('alert').filter({ hasText: "We couldn't load your appointments" });
   // The query retries before giving up; allow for its backoff.
   await expect(alert).toBeVisible({ timeout: 20_000 });
-  await expect(page.getByLabel('Appointment summary').getByText('Unavailable')).toHaveCount(3);
+  await expect(page.getByRole('region', { name: 'Next appointment' }).getByText('Unavailable')).toHaveCount(1);
 
   await page.unroute(LISTS);
   await alert.getByRole('button', { name: 'Try again' }).click();

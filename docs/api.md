@@ -112,7 +112,7 @@ Creates a business and makes you its **owner** (if `businessSlug` is omitted), o
 **201** `{ user: UserDto, accessToken, expiresInSeconds }` and both auth cookies.
 Errors: 400 (including `details.businessSlug` for an unknown code), 409 `EMAIL_TAKEN`, 429.
 
-Duplicates: an email is unique per business, compared case-insensitively (it is lower-cased first). Creating a workspace is also refused with `EMAIL_TAKEN` when the email already owns one, so a resubmitted owner signup never creates a second business; concurrent submissions are serialised and exactly one wins ([ADR-022](decisions.md#adr-022-one-workspace-per-owner-email)). Unknown body fields (`role`, `businessId`, ...) are ignored.
+Duplicates: an email is unique per business, compared case-insensitively (it is lower-cased first). Creating a workspace is also refused with `EMAIL_TAKEN` when the email already owns one, so a resubmitted owner signup never creates a second business; concurrent submissions are serialised and exactly one wins ([minor decisions](decisions.md#minor-decisions)). Unknown body fields (`role`, `businessId`, ...) are ignored.
 
 ```bash
 curl -i -c jar.txt -X POST http://localhost:4000/api/auth/signup \
@@ -220,7 +220,7 @@ Rules, all checked again at the moment of booking whatever the picker showed whe
 
 - **Who and where** come from the access token. `userId`, `customerId`, `businessId`, `status` and any other unknown body field are ignored.
 - **Time** is a wall-clock time in the **business** timezone, whatever the client's zone. It must be in the future on the business clock, on a weekday in `open_days`, on the 30-minute grid, and the whole appointment must end by closing time.
-- **DST.** A time a spring-forward skips (02:30 on a US transition day) does not exist and is refused with `details.time`. A time a fall-back repeats (01:30) is booked as its second, standard-time occurrence ([ADR-021](decisions.md#adr-021-closed-weekdays-are-a-column-with-an-every-day-default-dst-gaps-are-refused)).
+- **DST.** A time a spring-forward skips (02:30 on a US transition day) does not exist and is refused with `details.time`. A time a fall-back repeats (01:30) is booked as its second, standard-time occurrence ([minor decisions](decisions.md#minor-decisions)).
 - **Overlaps** with another live booking of the service, or with any of the caller's own, are 409, decided by EXCLUDE constraints under concurrency: of simultaneous requests for one slot exactly one succeeds.
 - A database failure at any point, the final COMMIT included, is a `500 INTERNAL` with nothing stored; a 201 is only sent after the commit.
 
@@ -274,7 +274,7 @@ Starts an empty conversation titled "New conversation"; the first message sent i
 ### `GET /api/chat/sessions/:id`
 
 **200** `{ session, messages: ChatMessageDto[], appointments: AppointmentDto[] }`. The newest 200 messages, oldest first.
-`ChatMessageDto`: `{ id, role, content, engine: "mistral"|"fallback"|"system"|null, action, suggestions?, draft?, appointmentId?, createdAt }`. `action`, `suggestions`, `draft` (the booking draft as it stood after that turn) and, on a `booked` turn, `appointmentId` are stored with each assistant turn, so a reload rebuilds every confirmation card, receipt and suggested-time chip from its own message. Messages stored before `draft`/`appointmentId` were recorded omit them.
+`ChatMessageDto`: `{ id, role, content, engine: "mistral"|"fallback"|"system"|null, action, suggestions?, clarification?, draft?, appointmentId?, createdAt }`. Each assistant turn is stored with its `action`, `draft` (the booking draft as it stood after that turn, always present on assistant messages), `suggestions` and `clarification` when it offered them and, on a `booked` turn, `appointmentId` (all in `chat_messages.meta`), so a reload rebuilds every confirmation card, receipt and chip from its own message.
 `appointments` are the conversation's bookings that are not cancelled (joined by `appointments.chat_session_id`, scoped to the caller's tenant and to the conversation's owner), oldest first, so a receipt shows the row as it is now however far off or long past it is.
 
 ### `POST /api/chat/messages` · chat tier
@@ -282,7 +282,7 @@ Starts an empty conversation titled "New conversation"; the first message sent i
 | Field | Rule |
 |---|---|
 | `content` | trimmed, 1–2000 chars |
-| `sessionId` | optional uuid. Omit it to create a session titled from the message |
+| `sessionId` | optional uuid. Omit it to create a session titled from the message (an opening greeting such as "Hi there," is dropped from the title) |
 
 **201** `AssistantTurnDto`:
 
@@ -298,7 +298,9 @@ Starts an empty conversation titled "New conversation"; the first message sent i
 }
 ```
 
-`action` is one of `collect_info` · `confirm` · `booked` (with `appointment`) · `needs_form`. `suggestions: [{ date, time, label }]` is present when the requested slot was refused. (`error` exists in the shared type but the server never sends it.)
+`action` is one of `collect_info` · `confirm` · `booked` (with `appointment`) · `needs_form`. (`error` exists in the shared type but the server never sends it.)
+`suggestions: [{ date, time, label }]` are real free times from the availability query: alternatives to a refused slot, or, when only the time is missing, the first free times on the chosen day within a part of day the user stated (morning before 12:00, afternoon 12:00–17:00, evening from 17:00).
+`clarification: { field: "date"|"time", options }` is present when the reply asks which of two readings the user meant (ISO dates or `HH:MM`); one question per turn, date first.
 Errors: 400, 404 (session), 409 `SESSION_CLOSED` (the message is **not** stored, unless the conversation was closed by a concurrent booking while this turn was in progress), 429. Provider failures are never errors.
 Side effects: `assistant:typing` (true, then false), `assistant:turn`, and `appointment:created` when it books.
 
@@ -312,7 +314,7 @@ curl -s -X POST http://localhost:4000/api/chat/messages -H "Authorization: Beare
 This completes the booking from the structured fallback form inside a conversation.
 `{ sessionId: uuid, slots: { serviceName?, date?, time?, notes? } }`. The slots are merged over the stored draft.
 
-**201** `AssistantTurnDto` with `engine: "system"`. It stores a user message ("Book X on D at T.") and the outcome. On success the session is completed and titled "Service — Mon, Oct 5".
+**201** `AssistantTurnDto` with `engine: "system"`. It stores a user message ("Book X on D at T.") and the outcome. The appointment is linked to the conversation but has `source: "form"`, since it was typed into a form, not understood from chat. On success the session is completed and titled "Service — Mon, Oct 5".
 Errors: 400 with `details` for every missing or unknown field at once, 404, 409 `SESSION_CLOSED`. A refused slot is **not** an HTTP error: it returns `action: "collect_info"` with `suggestions`.
 
 ---

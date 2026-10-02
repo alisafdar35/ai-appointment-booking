@@ -69,7 +69,7 @@ export function createApp(): Express {
   /**
    * Liveness + readiness in one. Reports DB reachability (a platform should
    * stop routing to an instance that cannot reach Postgres) and whether the
-   * LLM path is configured, so a reviewer can see at a glance which engine is
+   * LLM path is configured, so an operator can see at a glance which engine is
    * serving. Kept to one trivial query because it is probed constantly and
    * needs no authentication; AI usage is tenant data and lives behind an
    * owner login at /api/ai/summary. Registered before the rate limiter:

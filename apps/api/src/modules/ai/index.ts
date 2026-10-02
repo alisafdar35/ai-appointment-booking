@@ -7,36 +7,19 @@ import { recordAiInteraction, type AiOutcome } from './logs.js';
 import { ProviderError, type ProviderInput, type ProviderOutput } from './provider.js';
 
 export { confirmationPrompt, heldPrompt } from './copy.js';
-export { negates } from './fallback.js';
+export { negates, PART_OF_DAY_WINDOW, statedPartOfDay } from './parse.js';
 export type { ProviderInput, ProviderOutput } from './provider.js';
 
 const mistral = new MistralProvider();
 const fallback = new FallbackProvider();
 
 /**
- * The AI orchestrator.
- *
- * One function, one responsibility: produce a usable turn, and record what
- * happened. The policy is deliberately simple —
- *
- *   1. If a key is configured, try Mistral.
- *   2. Check a usable answer against what code can verify (guardrails.ts),
- *      correcting it where they disagree.
- *   3. On any failure (timeout, 5xx, rate limit, unparseable output), fall
- *      through to the deterministic extractor rather than returning an error.
- *   4. Record the attempt either way, corrections included.
- *
- * Step 3 is the design decision worth defending. The alternative — surface a
- * 503 and let the user retry — is a worse product: the user is mid-conversation
- * trying to book an appointment, and the business loses the booking because a
- * third-party API had a bad minute. A degraded reply that still captures "2pm
- * Thursday" is strictly better than an apology. The response reports which
- * engine served it, so the UI can be honest about the downgrade rather than
- * hiding it.
- *
- * No circuit breaker: with one retry and a hard timeout the worst case is
- * bounded, and a breaker's shared state does not survive the multi-instance
- * deployment this would need anyway. Noted as a limitation, not an oversight.
+ * Produce a usable turn and record what happened: try Mistral when a key is
+ * configured, correct a usable answer with code-checkable facts (guardrails),
+ * and on any failure serve the deterministic provider instead of an error —
+ * a user mid-booking should not lose it because a third party had a bad
+ * minute. The turn reports its engine so the UI can be honest about it.
+ * No circuit breaker: one retry and a hard timeout already bound the worst case.
  */
 export async function generateAssistantTurn(
   input: ProviderInput,

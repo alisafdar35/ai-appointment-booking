@@ -1,6 +1,6 @@
 # Database design
 
-PostgreSQL 16 (15+ required by migration 003). The DDL is plain SQL in [`db/migrations`](../db/migrations), sample data is in [`db/seed.sql`](../db/seed.sql), and the schema's guarantees are demonstrated in [`db/verify.sql`](../db/verify.sql). The same checks run in [`schema.test.ts`](../apps/api/test/integration/schema.test.ts) on every test run.
+PostgreSQL 16 (15+ required: the column-list `ON DELETE SET NULL (chat_session_id)`). The DDL is plain SQL in [`db/migrations`](../db/migrations) — [`001_schema.sql`](../db/migrations/001_schema.sql) (types, tables, constraints) and [`002_indexes.sql`](../db/migrations/002_indexes.sql) — sample data is in [`db/seed.sql`](../db/seed.sql), and the schema's guarantees are demonstrated in [`db/verify.sql`](../db/verify.sql). The same checks run in [`schema.test.ts`](../apps/api/test/integration/schema.test.ts) on every test run.
 
 ## Entity relationships
 
@@ -87,7 +87,7 @@ erDiagram
     text content
     jsonb tool_calls "raw extraction"
     text engine "mistral|fallback|system"
-    jsonb meta "{action, suggestions, missing, draft, appointmentId}"
+    jsonb meta "{action, missing, draft, suggestions, clarification, appointmentId}"
   }
   idempotency_keys {
     uuid business_id PK
@@ -118,14 +118,14 @@ erDiagram
 
 | Table | Purpose | Key constraints |
 |---|---|---|
-| `businesses` | Tenant root. Holds the booking policy (timezone, opening hours, open weekdays) the AI and availability read | `slug` citext unique with format CHECK; `closes_at > opens_at`; `open_days` non-empty subset of 1–7 ([007](../db/migrations/007_business_open_days.sql)) |
+| `businesses` | Tenant root. Holds the booking policy (timezone, opening hours, open weekdays) the AI and availability read | `slug` citext unique with format CHECK; `closes_at > opens_at`; `open_days` non-empty subset of 1–7 |
 | `users` | Authentication and profile | `UNIQUE (business_id, email)`, because email is unique **per tenant** (the same person can use two businesses); `UNIQUE (business_id, id)` as the target for composite FKs; email and phone format CHECKs |
-| `refresh_tokens` | Rotating, server-side refresh tokens | Only the SHA-256 is stored (`token_hash` unique); `revoked_at` + `replaced_by` keep the rotation chain so a replay can be told apart from a multi-tab race or a lost response; `abandoned` ([010](../db/migrations/010_refresh_token_abandoned.sql)) marks a successor revoked because its response never arrived; `expires_at > created_at` |
+| `refresh_tokens` | Rotating, server-side refresh tokens | Only the SHA-256 is stored (`token_hash` unique); `revoked_at` + `replaced_by` keep the rotation chain so a replay can be told apart from a multi-tab race or a lost response; `abandoned` marks a successor revoked because its response never arrived; `expires_at > created_at` |
 | `services` | Bookable catalogue. `duration_minutes` means the AI only has to extract a start time | `UNIQUE (business_id, name)`, `UNIQUE (business_id, id)`, duration 5–480, price ≥ 0 |
 | `appointments` | Scheduling data and status | See below |
 | `chat_sessions` | One conversation, its status and the **booking draft** carried across turns | Composite FK to users; `booking_draft` must be a JSON object; `UNIQUE (business_id, id)` |
 | `chat_messages` | The transcript, including the raw tool-call extraction and the outcome of each turn (`meta`) | `engine IN ('mistral','fallback','system')`, content ≤ 8000, `tool_calls` must be an array and `meta` an object |
-| `idempotency_keys` | Replay store for `POST /api/appointments` with an `Idempotency-Key` ([008](../db/migrations/008_idempotency_keys.sql)) | PK `(business_id, user_id, key)` is the race lock; composite FK to users; `appointment_id` FK cascades; `request_hash` exactly 32 bytes |
+| `idempotency_keys` | Replay store for `POST /api/appointments` with an `Idempotency-Key` | PK `(business_id, user_id, key)` is the race lock; composite FK to users; `appointment_id` FK cascades; `request_hash` exactly 32 bytes |
 | `ai_interaction_logs` | One row per provider call: success, timeout, fallback, or guardrail correction | Non-negative latency/tokens; `guardrails` must be an array |
 
 ### `appointments` in detail
@@ -143,21 +143,21 @@ CONSTRAINT appointments_no_overlap EXCLUDE USING gist (
 
 - **No double booking, enforced by the database.** Two concurrent requests can both pass the application's availability check, but only one can commit. The loser's `23P01` becomes `409 SLOT_UNAVAILABLE`, or a "someone just took that slot" reply with alternatives in chat. `'[)'` means 10:00–10:30 and 10:30–11:00 do not clash. Cancelled and completed rows are outside the predicate, so a freed slot can be rebooked immediately.
 - **Scope of the constraint:** it is per **service** ("one chair per service"), a prototype simplification. A real practice would constrain per practitioner or room.
-- **One customer, one place at a time.** [005](../db/migrations/005_appointments_customer_no_overlap.sql) adds `appointments_customer_no_overlap`, an `EXCLUDE` on `(business_id, user_id, slot)` with the same live-status predicate, so a customer cannot hold two overlapping bookings even for different services. Its violation becomes `409 CUSTOMER_BUSY`; the error handler tells the two constraints apart by name. Before adding it, the migration cancels the later-created booking of any overlapping pair, with a reason.
+- **One customer, one place at a time.** `appointments_customer_no_overlap` is a second `EXCLUDE`, on `(business_id, user_id, slot)` with the same live-status predicate, so a customer cannot hold two overlapping bookings even for different services. Its violation becomes `409 CUSTOMER_BUSY`; the error handler tells the two constraints apart by name.
 - **Status lifecycle.** Rows are inserted `confirmed` (the API sets it explicitly). `confirmed → cancelled` is the only transition today, by the customer or staff. `completed` and `no_show` are reserved for a staff endpoint that does not exist yet, and `pending` for an approval flow, which is why the column defaults to `pending`. The `admin` source is display-only: clients may send only `chat` or `form`.
-- **One booking per conversation.** [009](../db/migrations/009_one_booking_per_chat_session.sql) adds the partial unique index `appointments_one_live_per_chat_session` on `chat_session_id` for live rows. The API's guarantee is the `chat_sessions` row lock every session-linked booking takes (see [ai-integration.md](ai-integration.md#guardrails), row 2); the index is the backstop for a writer that skips it, and its violation also becomes `409 SESSION_CLOSED`. The migration first cancels all but the earliest live booking of any conversation holding several (the seed holds one).
-- **Composite tenant FKs.** A row cannot reference a user, service or (since [003](../db/migrations/003_appointment_chat_session_tenant_fk.sql)) conversation in another tenant. `chat_session_id` uses `ON DELETE SET NULL (chat_session_id)`, so deleting a conversation never deletes the appointment it produced.
+- **One booking per conversation.** The partial unique index `appointments_one_live_per_chat_session` on `chat_session_id` for live rows lives in `001_schema.sql` with the other integrity rules, not with the performance indexes. The API's guarantee is the `chat_sessions` row lock every session-linked booking takes (see [ai-integration.md](ai-integration.md#guardrails)); the index is the backstop for a writer that skips it, and its violation also becomes `409 SESSION_CLOSED`.
+- **Composite tenant FKs.** A row cannot reference a user, service or conversation in another tenant. `chat_session_id` uses `ON DELETE SET NULL (chat_session_id)`, so deleting a conversation never deletes the appointment it produced.
 - `ends_at > starts_at`; notes ≤ 2000; cancellation reason ≤ 500.
 - Native ENUMs for stable value sets (role, status, source, message role, session status). Adding a value is cheap; renaming one needs a migration.
 
 ## Indexing strategy
 
-Every index in [002_indexes.sql](../db/migrations/002_indexes.sql) names the query it serves. UNIQUE constraints already create a btree, and Postgres does **not** index foreign keys automatically, so FK indexes are explicit.
+Every index in [002_indexes.sql](../db/migrations/002_indexes.sql) names the query it serves (the one exception, the integrity index `appointments_one_live_per_chat_session`, is in `001_schema.sql`). UNIQUE constraints already create a btree, and Postgres does **not** index foreign keys automatically, so FK indexes are explicit.
 
 | Index | Serves | Used by |
 |---|---|---|
 | `UNIQUE (business_id, email)` on users | Signup uniqueness per tenant | the constraint itself |
-| `users_email_idx (email)` ([006](../db/migrations/006_users_email_idx.sql)) | Login lookup: the sign-in form sends no tenant, so the query filters on email alone, which the composite unique index cannot seek | `auth/repository.findUserForLogin` |
+| `users_email_idx (email)` | Login lookup: the sign-in form sends no tenant, so the query filters on email alone, which the composite unique index cannot seek | `auth/repository.findUserForLogin` |
 | `UNIQUE (token_hash)` | Refresh rotation lookup | `findRefreshToken` |
 | `refresh_tokens_user_idx (user_id)` | Revoke-all on theft, logout everywhere | `revokeAllForUser` |
 | `refresh_tokens_expires_idx (expires_at) WHERE revoked_at IS NULL` | Expired-token sweep | *No sweep job exists yet* |
@@ -178,9 +178,7 @@ Every index in [002_indexes.sql](../db/migrations/002_indexes.sql) names the que
 | `idempotency_keys_appointment_idx (appointment_id)` (partial) | FK cascade when an appointment is deleted | the FK itself |
 | `users_business_created_idx (business_id, created_at DESC)` | Tenant user list | *No endpoint uses it yet; kept for an admin view* |
 
-Migration [007](../db/migrations/007_business_open_days.sql) adds `businesses.open_days`. It is read per row together with the hours, never searched, so it has no index. Migration [008](../db/migrations/008_idempotency_keys.sql) adds `idempotency_keys`; see ADR-020 for why the key row is inserted before the booking. Migration [009](../db/migrations/009_one_booking_per_chat_session.sql)'s unique index is looked up by the same `chat_session_id` the FK index serves. Migration [010](../db/migrations/010_refresh_token_abandoned.sql) adds `refresh_tokens.abandoned`, read only on the row already found by its hash.
-
-Migration [004](../db/migrations/004_chat_turn_meta.sql) adds `chat_messages.meta`, `ai_interaction_logs.guardrails` and the `'system'` engine. None of these is filtered on, so it adds no index. That is deliberate: they are read and written as whole values.
+Columns with no index, deliberately: `businesses.open_days` (read per row with the hours, never searched), `refresh_tokens.abandoned` (read only on the row already found by its hash), and `chat_messages.meta` / `ai_interaction_logs.guardrails` (read and written as whole values, never filtered on). See [ADR-10](decisions.md#adr-10-booking-retries-use-an-idempotency-key-claimed-inside-the-booking-transaction) for why the idempotency key row is inserted before the booking.
 
 `db/verify.sql` check 6 runs `EXPLAIN` on the dashboard query to show it uses `appointments_user_starts_idx` with no Sort node.
 
@@ -207,6 +205,8 @@ Migration [004](../db/migrations/004_chat_turn_meta.sql) adds `chat_messages.met
 | Idempotency keys | Scheduled `DELETE ... WHERE created_at < now() - interval '24 hours'` using `idempotency_keys_created_idx`; the API already treats older rows as free |
 
 ## Migrations workflow
+
+The schema was **squashed before release** into `001_schema.sql` and `002_indexes.sql`: there was no production data to carry, so the development-time migrations (and their data-repair steps) were folded into the two files, proven equivalent by comparing `pg_dump --schema-only` of a database built each way (identical). From the first production data on, every change is a new **incremental** numbered migration; applied files are never edited.
 
 A minimal forward-only runner, [`apps/api/src/db/migrate.ts`](../apps/api/src/db/migrate.ts):
 

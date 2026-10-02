@@ -30,13 +30,13 @@ Deploy in this order: **database, then API, then web, then API CORS**. Each step
 | `CORS_ORIGINS` | a placeholder for now (e.g. `https://example.com`). Set the real Vercel origin in step 4 |
 | `MISTRAL_API_KEY` | optional. Leave it empty to run on the deterministic engine |
 
-   These are set by the blueprint: `NODE_ENV=production`, `NODE_VERSION=22`, `DATABASE_SSL=true`, `PG_POOL_MAX=5`, `JWT_SECRET` (generated), `CROSS_SITE_COOKIES=false`, `TRUST_PROXY_HOPS=2`, `MISTRAL_MODEL=ministral-8b-latest`, `LOG_LEVEL=info`. Every other variable keeps the default from [`env.ts`](../apps/api/src/config/env.ts); see the [README configuration table](../README.md#configuration).
+   These are set by the blueprint: `NODE_ENV=production`, `NODE_VERSION=22`, `DATABASE_SSL=true`, `PG_POOL_MAX=5`, `JWT_SECRET` (generated), `CROSS_SITE_COOKIES=false`, `TRUST_PROXY_HOPS=2`, `MISTRAL_MODEL=ministral-8b-latest`, `LOG_LEVEL=info`. Every other variable keeps the default from [`env.ts`](../apps/api/src/config/env.ts); see [configuration.md](configuration.md).
 
 3. What the blueprint runs:
    - **Build:** `npm ci --include=dev && npm run build:api`. This builds `@appt/shared`, then `tsc` writes the API to `apps/api/dist`.
    - **Start:** `npm run db:migrate:prod -w @appt/api && npm start -w @appt/api`. This runs `node dist/db/migrate.js`, which resolves `db/migrations` relative to `apps/api/dist/db` (four levels up is the repo root), applies pending files, then starts `node dist/index.js`.
    - **Health check:** `/health`. It returns 503 if the database is unreachable. Boot also fails fast if `SELECT 1` fails or any env var is invalid (including the `.env.example` placeholder `JWT_SECRET`), and the error names the variable.
-   - **Database TLS:** `DATABASE_SSL=true` verifies the server certificate. Neon's certificates are publicly trusted, so this should work as is, but it has not yet been exercised against Neon: if boot fails with a certificate error, that is the place to look.
+   - **Database TLS:** `DATABASE_SSL=true` verifies the server certificate. Neon's certificates are publicly trusted, and the live deployment runs this way.
 4. Open `https://<service>.onrender.com/health`. Expect `"status":"ok","db":"up"` and `"aiProvider"` set to `"mistral"` or `"fallback-only"`.
 
 > The free plan sleeps after inactivity, so the first request can take about 50 s. Open `/health` before a demo.

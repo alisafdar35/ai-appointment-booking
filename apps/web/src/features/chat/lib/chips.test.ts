@@ -42,14 +42,56 @@ describe('deriveQuickReplies', () => {
     expect(replies.map((reply) => reply.message)).toEqual(['tomorrow', 'Oct 4, 2026', 'Oct 5, 2026']);
   });
 
-  it('offers working-hour times when only the time is missing', () => {
+  it('offers the free times the server found when only the time is missing, labelled by time alone', () => {
+    const replies = deriveQuickReplies({
+      ...context,
+      draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup', date: '2026-10-05' },
+      meta: {
+        action: 'collect_info',
+        missing: ['time'],
+        suggestions: ['13:00', '13:30', '14:30', '15:00'].map((time) => ({ date: '2026-10-05', time, label: time })),
+      },
+    });
+    expect(replies.map((reply) => reply.label)).toEqual(['1:00 PM', '1:30 PM', '2:30 PM', '3:00 PM']);
+    expect(replies[0]?.message).toBe('Oct 5, 2026 at 1:00 PM');
+  });
+
+  it('invents no times: none are offered when the server found none', () => {
     const replies = deriveQuickReplies({
       ...context,
       draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup', date: '2026-10-05' },
       meta: { action: 'collect_info', missing: ['time'] },
     });
-    expect(replies.map((reply) => reply.label)).toEqual(['9:00 AM', '11:00 AM', '2:00 PM', '4:00 PM']);
-    expect(replies.map((reply) => reply.message)).toEqual(['9am', '11am', '2pm', '4pm']);
+    expect(replies).toEqual([]);
+  });
+
+  it('answers an ambiguous date with its two readings, and nothing else', () => {
+    const replies = deriveQuickReplies({
+      ...context,
+      draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' },
+      meta: {
+        action: 'collect_info',
+        missing: ['date', 'time'],
+        clarification: { field: 'date', options: ['2027-03-04', '2027-04-03'] },
+      },
+    });
+    expect(replies.map((reply) => reply.label)).toEqual(['Thu, Mar 4', 'Sat, Apr 3']);
+    expect(replies.map((reply) => reply.message)).toEqual(['Mar 4, 2027', 'Apr 3, 2027']);
+  });
+
+  it('answers an AM/PM question with the bookable readings, stating the meridiem', () => {
+    const replies = deriveQuickReplies({
+      ...context,
+      draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup', date: '2026-10-05' },
+      meta: {
+        action: 'collect_info',
+        missing: ['time'],
+        clarification: { field: 'time', options: ['09:00', '21:00'] },
+        suggestions: [{ date: '2026-10-05', time: '10:00', label: '10:00 AM' }],
+      },
+    });
+    expect(replies.map((reply) => reply.label)).toEqual(['9:00 AM', '9:00 PM']);
+    expect(replies.map((reply) => reply.message)).toEqual(['9:00 AM', '9:00 PM']);
   });
 
   it('prefers the server’s suggested slots when a time was taken, naming the date unambiguously', () => {

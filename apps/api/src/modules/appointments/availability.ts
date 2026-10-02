@@ -2,26 +2,12 @@ import { SLOT_GRID_MINUTES, type AvailabilityDto } from '@appt/shared';
 import { pool, type Queryable } from '../../db/pool.js';
 
 /**
- * Availability.
- *
- * Computed in a single SQL statement rather than by loading the day's
- * appointments into Node and looping. Three reasons:
- *   - the overlap test reuses the same GIST index that backs the
- *     appointments_no_overlap constraint, so "is this free?" and "is this
- *     allowed?" can never disagree;
- *   - business hours, timezone conversion and the booked set are all already
- *     in the database, so no round trip has to move them out and back;
- *   - it stays one query as the booked set grows.
- *
- * Candidate start times are on the SLOT_GRID_MINUTES grid (@appt/shared)
- * regardless of service length. A service longer than the grid simply occupies
- * several grid positions, and the overlap check marks the covered ones
- * unavailable.
- *
- * `customerId` is who the booking would be for. Their own live appointments
- * (for any service) also mark a time unavailable: offering it would only lead
- * to the appointments_customer_no_overlap refusal. Every booking is made for
- * the caller, so the routes pass the caller's id.
+ * A day's start times on the SLOT_GRID_MINUTES grid, each marked free or not,
+ * in one SQL statement: the overlap test uses the same GIST index as the
+ * EXCLUDE constraints, so "is this free?" and "is this allowed?" never
+ * disagree, and hours/timezone/booked set never leave the database.
+ * `customerId`'s own live bookings (any service) also block a time, since
+ * offering it would only meet the customer-overlap refusal.
  */
 export async function getAvailability(
   businessId: string,
