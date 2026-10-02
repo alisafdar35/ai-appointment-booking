@@ -76,9 +76,19 @@ const envSchema = z
     ...e,
     isProduction: e.NODE_ENV === 'production',
     isTest: e.NODE_ENV === 'test',
+    // Browsers send Origin as scheme://host[:port] with no path, so an entry
+    // pasted as "https://app.example.com/" would never match. Normalise to the
+    // bare origin; an entry that is not a URL is kept as typed.
     corsOrigins: e.CORS_ORIGINS.split(',')
       .map((o) => o.trim())
-      .filter(Boolean),
+      .filter(Boolean)
+      .map((o) => {
+        try {
+          return new URL(o).origin;
+        } catch {
+          return o;
+        }
+      }),
     /** Whether the LLM path is even possible. Checked once, not per request. */
     aiEnabled: Boolean(e.MISTRAL_API_KEY),
   }));
