@@ -104,7 +104,6 @@ jobs:
 
     env:
       NEXT_TELEMETRY_DISABLED: "1"
-      E2E_LOG_DIR: ${{ runner.temp }}/slotly-e2e
 
     steps:
       - uses: actions/checkout@v4
@@ -122,6 +121,9 @@ jobs:
 
       - name: E2E (fresh database, own API and web app, desktop + mobile)
         run: npm run e2e
+        env:
+          # Step-level: the runner context is not available in job-level env.
+          E2E_LOG_DIR: ${{ runner.temp }}/slotly-e2e
 
       - name: Upload report, traces and server logs
         if: failure()
