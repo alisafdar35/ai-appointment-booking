@@ -6,6 +6,7 @@ import { book, instant } from '../helpers/booking.js';
 import { SEED, freshDate, futureDate, pastDate } from '../helpers/fixtures.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient } from '../helpers/apiClient.js';
+import { todayInZone, zonedParts } from '../../src/lib/time.js';
 
 type Appointments = { appointments: AppointmentDto[] };
 
@@ -268,6 +269,19 @@ describe('appointments', () => {
     it('refuses a time that is in the past', async () => {
       assertApiError(await book(customer, { date: pastDate(1), time: '10:00' }), 422, 'APPOINTMENT_IN_PAST');
       assertApiError(await book(customer, { date: pastDate(30), time: '09:00' }), 422, 'APPOINTMENT_IN_PAST');
+    });
+
+    it('refuses a time earlier today in the business’s timezone', async (t) => {
+      // The latest half-hour slot strictly before the current minute, today in New York.
+      const now = new Date();
+      const { hour, minute } = zonedParts(now, SEED.bluewave.timezone);
+      const minutes = hour * 60 + minute;
+      if (minutes < 1) return t.skip('it is exactly midnight in New York: nothing earlier today');
+      const earlier = Math.floor((minutes - 1) / 30) * 30;
+      const time = `${String(Math.floor(earlier / 60)).padStart(2, '0')}:${String(earlier % 60).padStart(2, '0')}`;
+
+      const res = await book(customer, { date: todayInZone(SEED.bluewave.timezone, now), time });
+      assertApiError(res, 422, 'APPOINTMENT_IN_PAST');
     });
 
     it('checks "in the past" before opening hours', async () => {
@@ -742,7 +756,15 @@ describe('appointments', () => {
           book([customer, staff, owner, neighbour][i]!, { date, time, serviceId: SEED.services.teethWhitening.id }),
         ),
       );
-      assert.equal(results.filter((r) => r.status === 201).length, 1);
+      assert.equal(results.filter((r) => r.status === 201).length, 1, `statuses: ${results.map((r) => r.status).join(',')}`);
+      for (const loser of results.filter((r) => r.status !== 201)) assertApiError(loser, 409, 'SLOT_UNAVAILABLE');
+
+      const { rows } = await app.db.query(
+        `SELECT count(*)::int AS n FROM appointments
+         WHERE business_id = $1 AND status IN ('pending', 'confirmed') AND starts_at < $3 AND ends_at > $2`,
+        [SEED.bluewave.id, instant(date, '14:00'), instant(date, '15:30')],
+      );
+      assert.equal(rows[0].n, 1, 'exactly one live row may overlap 14:00-15:30');
     });
 
     it('lets exactly one of several simultaneous cancellations of the same appointment succeed', async () => {

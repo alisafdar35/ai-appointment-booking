@@ -4,7 +4,16 @@ import { EMPTY_SLOTS, type BookingSlots, type ServiceDto } from '@appt/shared';
 import { referenceToday } from '../helpers/clock.js';
 import { CONSENT_TABLE } from '../helpers/consent.js';
 import { addDays, nextWeekday } from '../helpers/fixtures.js';
-import { FallbackProvider, answerAboutService, isAffirmative, matchBareHour, matchOrdinalDay, matchService, resolveMeridiem } from '../../src/modules/ai/fallback.js';
+import {
+  FallbackProvider,
+  answerAboutService,
+  isAffirmative,
+  matchBareHour,
+  matchOrdinalDay,
+  matchService,
+  requestedService,
+  resolveMeridiem,
+} from '../../src/modules/ai/fallback.js';
 import type { ProviderInput } from '../../src/modules/ai/provider.js';
 
 /**
@@ -382,6 +391,26 @@ describe('matchService', () => {
 
   it('copes with an empty catalogue', () => {
     assert.equal(matchService('anything', []), null);
+  });
+});
+
+describe('requestedService', () => {
+  it('names a thing asked for with booking context, so the chat can say it is not offered', () => {
+    assert.equal(requestedService("I'd like a haircut on Monday at 11am"), 'haircut');
+    assert.equal(requestedService('Book me a deep tissue massage tomorrow'), 'deep tissue massage');
+    assert.equal(requestedService('can I get a manicure appointment'), 'manicure');
+  });
+
+  it('does not treat generic words, or a request with no booking context, as a service', () => {
+    for (const text of [
+      'Book a consultation tomorrow at 10 AM.',
+      'I want an appointment.',
+      'I need a time on Friday',
+      'I need a moment to think',
+      'I want a refund',
+    ]) {
+      assert.equal(requestedService(text), null, text);
+    }
   });
 });
 

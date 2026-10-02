@@ -10,7 +10,7 @@ import { messageBox, send, transcript } from './support/chat';
 const MARKUP = [
   '<img src=x onerror="window.__xss=1;alert(1)">',
   '<script>window.__xss=2;alert(2)</script>',
-  '<svg onload="window.__xss=3">',
+  '<svg onload="window.__xss=3;alert(3)">',
 ] as const;
 
 /** Fails the test if anything a payload tried to run did run. */
@@ -34,7 +34,7 @@ const noHorizontalOverflow = (page: Page) =>
 test.describe('markup is shown as text, never run', () => {
   test('in a name, a chat message and booking notes', async ({ page, request }) => {
     const verify = watchForExecution(page);
-    const account = newAccount(`Mallory ${MARKUP[0]}`);
+    const account = newAccount(`Mallory ${MARKUP.join(' ')}`);
     const api = await ApiClient.connect(request, account, { signUp: true });
     await page.request.post('/api/auth/login', { data: { email: account.email, password: account.password } });
     await page.addInitScript(() => window.localStorage.setItem('slotly.session', '1'));
@@ -42,15 +42,20 @@ test.describe('markup is shown as text, never run', () => {
     await api.book({ serviceId: slot.service.id, date: slot.date, time: slot.time, notes: MARKUP.join(' ') });
 
     await page.goto('/assistant');
-    // The name appears verbatim in the account menu.
-    await expect(page.getByRole('button', { name: new RegExp(account.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) })).toBeVisible();
+    // The name, all three payloads in it, appears verbatim in the account menu.
+    const accountMenu = page.getByRole('button', { name: new RegExp(account.fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+    await expect(accountMenu).toBeVisible();
 
-    for (const payload of MARKUP.slice(1)) {
+    for (const payload of MARKUP) {
       await send(page, payload);
       await expect(transcript(page).getByText(payload, { exact: true })).toBeVisible();
     }
+    // Checked here, with the payloads on screen as messages and in the name...
+    await verify();
 
+    // ...and again where the name and the notes render together.
     await page.goto('/appointments');
+    await expect(accountMenu).toBeVisible();
     await expect(page.getByRole('article', { name: 'Routine Checkup' })).toContainText(MARKUP.join(' '));
     await verify();
   });

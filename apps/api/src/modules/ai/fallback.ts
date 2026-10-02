@@ -181,7 +181,7 @@ export function extractSlots(text: string, ctx: ExtractionContext): Partial<Book
   const slots: Partial<BookingSlots> = {};
 
   // ---- service -------------------------------------------------------
-  const service = matchService(text, ctx.services.map((s) => s.name));
+  const service = matchService(text, ctx.services.map((s) => s.name)) ?? requestedService(text);
   if (service) slots.serviceName = service;
 
   // ---- date and time -------------------------------------------------
@@ -261,6 +261,29 @@ export function matchService(text: string, serviceNames: string[]): string | nul
   // incidental word does not select a service the user never mentioned.
   if (!best || best.score < 0.5 || runnerUp?.score === best.score) return null;
   return best.name;
+}
+
+/**
+ * "I'd like a haircut on Monday" -> "haircut": a thing asked for by name that
+ * the catalogue did not match. Returned as the slot so the chat service, which
+ * cannot resolve it, says "we don't offer that" and lists what it does — the
+ * same answer the model path gives — instead of asking "which service?" as if
+ * nothing had been named. Only a noun phrase directly followed by booking
+ * context counts, and generic words ("an appointment", "a consultation", "a
+ * time") are not services, so "I need a moment to think" names nothing.
+ */
+const SERVICE_REQUEST =
+  /\b(?:book(?:\s+me)?(?:\s+in)?(?:\s+for)?|schedule|i['’]?d like|i would like|i want|i need|can i (?:get|have|book))\s+(?:a|an)\s+((?:[a-z][a-z-]*\s+){0,2}?[a-z][a-z-]*)(?=\s+(?:appointment|session|visit|on|at|tomorrow|today|next|this)\b)/i;
+const GENERIC_REQUEST = new Set([
+  'appointment', 'booking', 'slot', 'time', 'visit', 'session', 'consultation', 'consult', 'day', 'date',
+  'meeting', 'reservation', 'checkup', 'check-up', 'one', 'spot',
+]);
+
+export function requestedService(text: string): string | null {
+  const phrase = text.match(SERVICE_REQUEST)?.[1]?.toLowerCase();
+  if (!phrase) return null;
+  const head = phrase.split(/\s+/).at(-1)!;
+  return GENERIC_REQUEST.has(head) ? null : phrase;
 }
 
 /**

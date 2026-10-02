@@ -228,9 +228,9 @@ Web (`apps/web`, read by Next.js **at build time**):
 
 | Suite | Command | Count (latest local run) | Needs |
 |---|---|---|---|
-| API unit + integration | `npm test -w @appt/api` | **760 tests**, 26 files, all passing (~50 s) | Postgres on :5433, or `TEST_DATABASE_URL` pointing at a server where the role can CREATE DATABASE (name must end in `_test`; it creates `<name>` and `<name>_1`…`_3`) |
-| Web unit/component | `npm test -w @appt/web` | **461 tests**, 40 files, all passing (~8 s) | nothing |
-| End-to-end (Playwright) | `npm run e2e` | **98 tests** (49 scenarios × desktop and mobile Chrome, 11 spec files): 96 pass, 2 skipped by design (the keyboard-only scenario runs on desktop only); `E2E_ALL_BROWSERS=1` adds Firefox and WebKit | Postgres on :5433, ports 3100 and 4100 free |
+| API unit + integration | `npm test -w @appt/api` | **769 tests**, 26 files, all passing (~50 s) | Postgres on :5433, or `TEST_DATABASE_URL` pointing at a server where the role can CREATE DATABASE (name must end in `_test`; it creates `<name>` and `<name>_1`…`_3`) |
+| Web unit/component | `npm test -w @appt/web` | **462 tests**, 40 files, all passing (~8 s) | nothing |
+| End-to-end (Playwright) | `npm run e2e` | **98 tests** (49 scenarios × desktop and mobile Chrome, 11 spec files): 96 pass, 2 skipped by design (the two `accessibility.spec` scenarios, keyboard-only and 200% zoom, run on desktop only); `E2E_ALL_BROWSERS=1` adds Firefox and WebKit | Postgres on :5433, ports 3100 and 4100 free |
 | Types + lint | `npm run typecheck && npm run lint` | clean | — |
 
 - The **API integration tests** run the real `createApp()` over HTTP, against a database built by the production migration runner and `db/seed.sql`. Mistral is exercised through a local stub that speaks the chat-completions protocol. Details: [apps/api/test/README.md](apps/api/test/README.md).

@@ -120,6 +120,19 @@ export async function findById(
 }
 
 /**
+ * Queue this transaction's booking insert behind any other in the same business
+ * until it commits. Without it, two inserts whose ranges overlap can each find
+ * the other's uncommitted row in an EXCLUDE index and wait on it: Postgres
+ * breaks that deadlock by aborting one with 40P01, which reached the client as
+ * a 500 instead of "slot taken". Queued, the second insert meets the first's
+ * committed row as an ordinary exclusion violation. Held to the end of the
+ * transaction; bookings in different businesses never wait on each other.
+ */
+export async function lockBookingsFor(client: Queryable, businessId: string): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('appointments:' || $1, 0))`, [businessId]);
+}
+
+/**
  * Insert an appointment, converting the business-local wall clock to an instant
  * inside the database.
  *

@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AppointmentDto, AvailabilityDto, UserDto } from '@appt/shared';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
@@ -146,31 +146,55 @@ describe('BookingDialog', () => {
     expect(create.mock.calls[0]?.[0]).toMatchObject({ notes: undefined });
   });
 
-  it('blocks a second submit while the first is in flight', async () => {
-    const create = vi.spyOn(appointmentsApi, 'create').mockReturnValue(new Promise(() => {}));
-    open();
-    await fillBooking();
-    await submit();
-
-    const button = await screen.findByRole('button', { name: 'Book appointment' });
-    expect(button).toHaveAttribute('aria-busy', 'true');
-    await userEvent.click(button);
-    fireEvent.submit(button.closest('form') ?? button);
-    expect(create).toHaveBeenCalledTimes(1);
-  });
-
-  it('blocks a double click: two clicks before React re-renders still make one request', async () => {
+  it('makes one request from two back-to-back clicks', async () => {
     const create = vi.spyOn(appointmentsApi, 'create').mockReturnValue(new Promise(() => {}));
     open();
     await fillBooking();
 
     const button = screen.getByRole('button', { name: 'Book appointment' });
-    // Synchronous, back to back: no render happens between them.
     fireEvent.click(button);
     fireEvent.click(button);
 
     await waitFor(() => expect(create).toHaveBeenCalled());
     await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('the in-flight guard alone: two submits in one act, with no re-render between them, make one request', async () => {
+    const create = vi.spyOn(appointmentsApi, 'create').mockReturnValue(new Promise(() => {}));
+    open();
+    await fillBooking();
+
+    const button = screen.getByRole('button', { name: 'Book appointment' });
+    const form = document.getElementById(button.getAttribute('form')!) as HTMLFormElement;
+    // Submit events go straight to the form, so whether the button is disabled
+    // plays no part; inside one act React cannot re-render between them.
+    act(() => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('the busy button alone: once a booking is in flight, clicking it again does not even submit the form', async () => {
+    const create = vi.spyOn(appointmentsApi, 'create').mockReturnValue(new Promise(() => {}));
+    open();
+    await fillBooking();
+    await submit();
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+
+    const button = screen.getByRole('button', { name: 'Book appointment' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('aria-busy', 'true');
+    const form = document.getElementById(button.getAttribute('form')!) as HTMLFormElement;
+    const submits = vi.fn();
+    form.addEventListener('submit', submits);
+    fireEvent.click(button);
+    await userEvent.click(button, { pointerEventsCheck: 0 });
+    expect(submits).not.toHaveBeenCalled();
     expect(create).toHaveBeenCalledTimes(1);
   });
 

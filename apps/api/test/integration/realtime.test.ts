@@ -8,10 +8,10 @@ import {
   type AssistantTypingPayload,
   type AuthResponse,
 } from '@appt/shared';
-import { eventually, sleep } from '../helpers/assertions.js';
+import { eventually } from '../helpers/assertions.js';
 import { book } from '../helpers/booking.js';
 import { SEED, freshDate } from '../helpers/fixtures.js';
-import { closeAllSockets, connect, connectExpectingRefusal } from '../helpers/socketClient.js';
+import { closeAllSockets, connect, connectExpectingRefusal, type Connection } from '../helpers/socketClient.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient } from '../helpers/apiClient.js';
 
@@ -58,8 +58,21 @@ describe('realtime', () => {
     await app.stop();
   });
 
-  /** Long enough for a stray event to have arrived if one was going to. */
-  const settle = () => sleep(250);
+  /**
+   * Wait until anything the server emitted before now has reached these
+   * connections. Every emit under test happens before its HTTP response is
+   * sent, and Socket.IO delivers one socket's packets in order, so once a
+   * barrier broadcast after the response arrives, a stray event would already
+   * be there. The barrier is removed again, leaving only the app's events.
+   */
+  let barriers = 0;
+  async function settle(...connections: Connection[]): Promise<void> {
+    const id = (barriers += 1);
+    const isBarrier = (e: Connection['events'][number]) => e.name === 'test:barrier' && e.payload === id;
+    app.io!.emit('test:barrier', id);
+    await Promise.all(connections.map((c) => eventually(() => c.events.some(isBarrier))));
+    for (const c of connections) c.events.splice(c.events.findIndex(isBarrier), 1);
+  }
 
   describe('handshake', () => {
     it('accepts a valid access token', async () => {
@@ -158,7 +171,7 @@ describe('realtime', () => {
       await mine.waitFor(SOCKET_EVENTS.APPOINTMENT_CREATED);
       const seenByStaff = await colleague.waitFor<{ appointment: AppointmentDto }>(SOCKET_EVENTS.APPOINTMENT_CREATED);
       assert.deepEqual(seenByStaff.appointment, res.body.appointment, 'the staff dashboard gets the booking as it happens');
-      await settle();
+      await settle(mine, colleague, otherCustomer, outsider);
 
       assert.deepEqual(otherCustomer.events, [], 'another customer of the same business heard nothing');
       assert.deepEqual(outsider.events, [], 'another tenant heard nothing');
@@ -170,7 +183,7 @@ describe('realtime', () => {
       const theirs = await book(staff, { date: freshDate(), time: '14:00' });
       const event = await colleague.waitFor<{ appointment: AppointmentDto }>(SOCKET_EVENTS.APPOINTMENT_CREATED);
       assert.equal(event.appointment.id, theirs.body.appointment.id);
-      await settle();
+      await settle(colleague);
       assert.equal(colleague.received(SOCKET_EVENTS.APPOINTMENT_CREATED).length, 1);
     });
 
@@ -178,7 +191,7 @@ describe('realtime', () => {
       const connection = await connect(app.baseUrl, { token: customer.accessToken });
       const res = await book(customer, { date: freshDate(), time: '03:00' });
       assert.equal(res.status, 422);
-      await settle();
+      await settle(connection);
       assert.deepEqual(connection.events, []);
     });
   });
@@ -242,7 +255,7 @@ describe('realtime', () => {
         await app.db.query('ALTER TABLE chat_messages DROP CONSTRAINT test_no_replies');
       }
 
-      await settle();
+      await settle(connection);
       assert.deepEqual(connection.received(SOCKET_EVENTS.ASSISTANT_TYPING), [
         { sessionId, typing: true },
         { sessionId, typing: false },
@@ -254,14 +267,14 @@ describe('realtime', () => {
       const connection = await connect(app.baseUrl, { token: customer.accessToken });
       const res = await customer.post('/api/chat/messages', { content: 'hello', sessionId: '00000000-0000-4000-8000-000000000000' });
       assert.equal(res.status, 404);
-      await settle();
+      await settle(connection);
       assert.deepEqual(connection.events, []);
     });
 
     it('keeps one user’s conversation out of another user’s socket', async () => {
       const other = await connect(app.baseUrl, { token: staff.accessToken });
       await customer.post('/api/chat/messages', { content: 'something private about my teeth' });
-      await settle();
+      await settle(other);
       assert.deepEqual(other.events, []);
     });
   });

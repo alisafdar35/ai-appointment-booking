@@ -2,7 +2,7 @@
 
 Every requirement line in the brief, with its status and the evidence. **Done** means implemented and covered by tests or manual verification. **Partial** and **Not yet** are explained.
 
-Test counts are from the latest local run: API 760 passing (26 files), web 461 passing (40 files). The e2e suite has 98 tests (49 scenarios × 2 viewports; 96 pass, 2 skipped by design). `npm run e2e` runs it against its own freshly seeded database and stack.
+Test counts are from the latest local run: API 769 passing (26 files), web 462 passing (40 files). The e2e suite has 98 tests (49 scenarios × 2 viewports; 96 pass, 2 skipped by design). `npm run e2e` runs it against its own freshly seeded database and stack.
 
 ## Submission
 
@@ -66,7 +66,7 @@ Test counts are from the latest local run: API 760 passing (26 files), web 461 p
 | *Eval:* API clarity and consistency | Done | One envelope and stable codes; named action for cancel |
 | *Eval:* security awareness | Done | httpOnly cookies, refresh rotation with reuse detection, Origin check (CSRF), helmet, constant-time login miss, bcrypt 72-byte rule, pinned JWT algorithm, tenant-scoped queries, open-redirect-safe `next`. Limitations listed in the README |
 | *Eval:* separation of concerns, service boundaries | Done | routes / services / repositories / ai ([architecture.md § Service boundaries](architecture.md#service-boundaries)) |
-| *Eval:* code organization and maintainability | Done | Module-per-domain; 760 API tests |
+| *Eval:* code organization and maintainability | Done | Module-per-domain; 769 API tests |
 
 ## 3. AI integration service
 
@@ -107,4 +107,4 @@ Test counts are from the latest local run: API 760 passing (26 files), web 461 p
 | Quality of UI implementation and usability | [frontend.md](frontend.md), [screenshots](screenshots), Playwright specs |
 | Realistic use of AI in a product workflow | [ai-integration.md](ai-integration.md) |
 | Ability to explain and defend tradeoffs | ADRs, each with "Alternatives" and "Cost" |
-| Testing (not asked; included) | 760 API + 461 web + 98 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e included) |
+| Testing (not asked; included) | 769 API + 462 web + 98 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e included) |

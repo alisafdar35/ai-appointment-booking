@@ -192,6 +192,40 @@ describe('chat', () => {
       assert.equal(t3.action, 'confirm');
     });
 
+    it('replaces the date and time on "Actually, make it Wednesday at 2 PM." and asks again before booking', async () => {
+      const date = freshDate();
+      // A weekday two days out: today's own weekday would be asked about (today or next week?).
+      const day = addDays(today, 2);
+      const weekday = weekdayName(day);
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      assert.equal(t1.action, 'confirm');
+
+      const t2 = await turn(customer, `Actually, make it ${weekday} at 2 PM.`, t1.sessionId);
+      assert.equal(t2.action, 'confirm');
+      assert.deepEqual(t2.bookingDraft, { serviceName: 'Routine Checkup', date: day, time: '14:00', notes: null });
+      assert.match(t2.message.content, new RegExp(`${weekday}, .* at 2:00 PM\\. Shall I book it\\?`));
+      assert.equal(t2.appointment, undefined);
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+    });
+
+    it('takes "Book a consultation tomorrow at 10 AM." as a day and time, invents no service, and lists the real ones', async () => {
+      const t = await turn(customer, 'Book a consultation tomorrow at 10 AM.');
+      assert.equal(t.action, 'collect_info');
+      assert.deepEqual(t.bookingDraft, { serviceName: null, date: addDays(today, 1), time: '10:00', notes: null });
+      assert.match(t.message.content, /Which service would you like\? We offer: Emergency Consult, Orthodontic Review, Routine Checkup, Teeth Whitening/);
+      assert.deepEqual(await appointmentsFor(t.sessionId), []);
+    });
+
+    it('says a service the business does not offer is not offered, and lists the ones it does', async () => {
+      const date = freshDate();
+      const t = await turn(customer, `I'd like a haircut on ${date} at 11am`);
+      assert.equal(t.action, 'collect_info');
+      assert.deepEqual(t.bookingDraft, { serviceName: null, date, time: '11:00', notes: null }, 'the day and time are kept');
+      assert.match(t.message.content, /^We don't offer that\./);
+      assert.match(t.message.content, /Emergency Consult, Orthodontic Review, Routine Checkup, Teeth Whitening/);
+      assert.deepEqual(await appointmentsFor(t.sessionId), []);
+    });
+
     /** A refusal in place of the summary: nothing to say "yes" to. */
     const assertRefusedBeforeSummary = (t: AssistantTurnDto) => {
       assert.equal(t.action, 'collect_info', 'no summary is shown for a slot the booking would refuse');
@@ -486,6 +520,31 @@ describe('chat', () => {
       assert.equal((await turn(customer, 'yes', t1.sessionId)).action, 'booked');
       assertApiError(await book(customer, { date, time: '15:00', chatSessionId: t1.sessionId }), 409, 'SESSION_CLOSED');
       assert.equal((await appointmentsFor(t1.sessionId)).length, 1);
+    });
+
+    it('stays closed after its booking is cancelled: the form and the draft form cannot book into it again', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      const booked = await turn(customer, 'yes', t1.sessionId);
+      assert.equal(booked.action, 'booked');
+      const cancel = await customer.post(`/api/appointments/${booked.appointment!.id}/cancel`, {});
+      assert.equal(cancel.status, 200);
+
+      // The cancelled row no longer holds the one-per-conversation index, so
+      // only the conversation's own status stands in the way now.
+      assertApiError(await book(customer, { date, time: '15:00', chatSessionId: t1.sessionId }), 409, 'SESSION_CLOSED');
+      assertApiError(
+        await customer.post('/api/chat/draft', {
+          sessionId: t1.sessionId,
+          slots: { serviceName: 'Routine Checkup', date, time: '16:00' },
+        }),
+        409,
+        'SESSION_CLOSED',
+      );
+      const live = await app.db.query(`SELECT 1 FROM appointments WHERE chat_session_id = $1 AND status <> 'cancelled'`, [
+        t1.sessionId,
+      ]);
+      assert.equal(live.rowCount, 0);
     });
 
     it('refuses a day the business is closed before summarising it, forgets that day, and asks for another', async () => {

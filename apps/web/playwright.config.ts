@@ -31,7 +31,10 @@ export default defineConfig({
   globalSetup: './e2e/support/preflight.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 2 : 0,
+  // One retry on CI keeps the trace of a failure, but a test that only passes
+  // on its retry still fails the run: a flake is reported, never hidden.
+  retries: process.env.CI ? 1 : 0,
+  failOnFlakyTests: !!process.env.CI,
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list']],
   expect: { timeout: 10_000 },
   use: {

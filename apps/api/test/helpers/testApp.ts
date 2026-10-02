@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
+import type { Server as RealtimeServer } from 'socket.io';
 import { ApiClient } from './apiClient.js';
 import { SEED, type SeededUser } from './fixtures.js';
 
@@ -70,6 +71,8 @@ export interface TestApp {
   baseUrl: string;
   /** The application's own pool, for arranging and inspecting state directly. */
   db: pg.Pool;
+  /** The Socket.IO server, when started with `realtime: true`. */
+  io: RealtimeServer | null;
   /** An anonymous client with an empty cookie jar. */
   client(): ApiClient;
   /** A client signed in as one of the seeded accounts. */
@@ -176,7 +179,7 @@ export async function startTestApp(options: TestAppOptions = {}): Promise<TestAp
     await pool.query(await readFile(path.join(REPO_ROOT, 'db/seed.sql'), 'utf8'));
 
     const server: Server = createServer(createApp());
-    if (options.realtime) realtime.initRealtime(server);
+    const io = options.realtime ? realtime.initRealtime(server) : null;
     teardown.push(async () => {
       await realtime.closeRealtime();
       server.closeAllConnections();
@@ -188,6 +191,7 @@ export async function startTestApp(options: TestAppOptions = {}): Promise<TestAp
     return {
       baseUrl,
       db: pool,
+      io,
       client: () => new ApiClient(baseUrl),
       async loginAs(user) {
         const client = new ApiClient(baseUrl);

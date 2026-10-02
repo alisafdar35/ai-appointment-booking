@@ -8,10 +8,10 @@ import type { ApiClient } from '../helpers/apiClient.js';
 /**
  * Rate limiting, which every other test file switches off.
  *
- * Counters live in memory for the life of the process, so the tests in this
- * file are ordered: each one starts from the state the previous one left. They
- * are in one file, with the limiter on, precisely so that dependency is
- * visible rather than accidental.
+ * Counters live in memory for the life of the process and are shared by the
+ * tests in this file. A test that needs a limiter blocked trips it itself, and
+ * one that counts a budget reads what is left from the RateLimit header rather
+ * than assuming what earlier tests spent.
  *
  * All requests come from one address (127.0.0.1), so the per-IP limiters see a
  * single client. The chat and write limiters are keyed by user id instead,
@@ -41,6 +41,13 @@ describe('rate limiting', () => {
   const wrongLogin = (headers: Record<string, string> = {}) =>
     app.client().post('/api/auth/login', { email: SEED.users.customer.email, password: 'Wrong-Password-1' }, { headers });
 
+  /** Trip the login limiter, if an earlier test has not already. */
+  async function blockLogin(): Promise<void> {
+    for (let attempt = 1; (await wrongLogin()).status !== 429; attempt += 1) {
+      assert.ok(attempt <= 10, 'the login limiter never engaged');
+    }
+  }
+
   describe('login, signup and refresh', () => {
     it('does not count successful requests, so a legitimate user is never throttled', async () => {
       // Twelve successful refreshes: more than the limit of ten, and the last
@@ -68,12 +75,14 @@ describe('rate limiting', () => {
     });
 
     it('keeps blocking, even for the correct password, until the window passes', async () => {
+      await blockLogin();
       const res = await app.client().login(SEED.users.customer.email, SEED.password);
       assertApiError(res, 429, 'RATE_LIMITED');
       assert.deepEqual(res.setCookies, [], 'a blocked login must not start a session');
     });
 
     it('applies the same budget to signup, which shares the credential-stuffing surface', async () => {
+      await blockLogin();
       const signup = await app.client().post('/api/auth/signup', {
         email: 'blocked@example.test',
         password: 'Sup3rSecretPass',
@@ -83,10 +92,12 @@ describe('rate limiting', () => {
     });
 
     it('gives refresh a budget of its own, so a locked-out login does not end live sessions', async () => {
+      await blockLogin();
       assert.equal((await customer.post('/api/auth/refresh')).status, 200);
     });
 
     it('cannot be evaded by claiming a different address in X-Forwarded-For', async () => {
+      await blockLogin();
       // No proxy is trusted outside production, so the header is ignored and
       // the real socket address is what is counted.
       for (const forwarded of ['203.0.113.7', '198.51.100.23, 203.0.113.99', '2001:db8::1']) {
@@ -95,6 +106,7 @@ describe('rate limiting', () => {
     });
 
     it('leaves the rest of the API available while the login endpoint is blocked', async () => {
+      await blockLogin();
       assert.equal((await customer.get('/api/appointments')).status, 200);
       assert.equal((await customer.get('/api/services')).status, 200);
       assert.equal((await app.client().get('/api/health')).status, 200);
@@ -106,25 +118,35 @@ describe('rate limiting', () => {
     const failedRefresh = () => app.client().post('/api/auth/refresh');
 
     it('answers failed refreshes from its own budget, even while login is blocked', async () => {
+      await blockLogin();
       assertApiError(await wrongLogin(), 429, 'RATE_LIMITED');
       for (let i = 1; i <= 5; i += 1) assertApiError(await failedRefresh(), 401, 'UNAUTHENTICATED');
     });
 
     it('counts every request, successful or not, and stops a runaway client at 60 per 5 minutes', async () => {
-      // Already spent in this file: 13 successful refreshes and 5 failed ones.
-      const spent = 13 + 5;
+      // Read the budget left rather than assume what earlier tests spent.
+      const remaining = (res: { headers: Headers }) => Number(/remaining=(\d+)/.exec(res.headers.get('ratelimit') ?? '')?.[1]);
+      const failed = await failedRefresh();
+      assertApiError(failed, 401, 'UNAUTHENTICATED');
+      assert.match(failed.headers.get('ratelimit-policy') ?? '', /^60;/);
+      const before = remaining(failed);
+      assert.ok(before > 1, `budget left: ${before}`);
+
+      const succeeded = await customer.post('/api/auth/refresh');
+      assert.equal(succeeded.status, 200);
+      assert.equal(remaining(succeeded), before - 1, 'a success is counted along with failures');
+
       let allowed = 0;
       for (;;) {
         const res = await failedRefresh();
         if (res.status === 429) {
           assertApiError(res, 429, 'RATE_LIMITED');
-          assert.match(res.headers.get('ratelimit-policy') ?? '', /60/);
           break;
         }
         allowed += 1;
         assert.ok(allowed <= 60, 'the limiter never engaged');
       }
-      assert.equal(allowed, 60 - spent, 'successes are counted along with failures');
+      assert.equal(allowed, before - 1, 'stopped exactly when the 60-request budget ran out');
     });
   });
 
@@ -140,13 +162,20 @@ describe('rate limiting', () => {
       assert.ok(blocked.headers.get('retry-after'));
     });
 
+    /** Flood the customer's chat budget, if an earlier test has not already. */
+    async function floodCustomer(): Promise<void> {
+      for (let i = 1; (await say(customer)).status !== 429; i += 1) assert.ok(i <= 20, 'chat never throttled');
+    }
+
     it('counts per user, not per address: one user’s flood leaves another untouched', async () => {
-      // Same machine, same IP as the throttled customer above.
+      // Same machine, same IP as the throttled customer.
+      await floodCustomer();
       assert.equal((await say(staff)).status, 201);
       assert.equal((await say(owner)).status, 201);
     });
 
     it('does not throttle the same user’s other requests', async () => {
+      await floodCustomer();
       assert.equal((await customer.get('/api/appointments')).status, 200);
       assert.equal((await customer.get('/api/chat/sessions')).status, 200, 'reading history is not a model call');
     });
@@ -162,7 +191,10 @@ describe('rate limiting', () => {
     });
 
     it('keeps chat and writes in separate budgets', async () => {
-      // The owner has just exhausted the write limit but has used one chat message.
+      // Exhaust the owner's write budget here (a no-op if the test above already did).
+      let writes = 0;
+      while ((await owner.post('/api/chat/sessions')).status === 201) assert.ok((writes += 1) <= 40, 'writes never throttled');
+      assertApiError(await owner.post('/api/chat/sessions'), 429, 'RATE_LIMITED');
       assert.equal((await owner.post('/api/chat/messages', { content: 'still here' })).status, 201);
     });
   });

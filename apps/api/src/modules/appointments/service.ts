@@ -238,6 +238,7 @@ async function book(ctx: BookingContext, input: CreateAppointmentInput, options:
   if (refused) return refused;
 
   const insert = async (client: Queryable) => {
+    await repo.lockBookingsFor(client, ctx.businessId);
     const id = await repo.create(client, {
       businessId: ctx.businessId,
       userId: ctx.userId,

@@ -53,6 +53,24 @@ describe('production mode', () => {
       }
     });
 
+    it('hides a genuine database failure too: a real missing-table error from Postgres, not a mock', async () => {
+      await app.db.query('ALTER TABLE services RENAME TO services_gone_for_test');
+      try {
+        const res = await customer.get('/api/services');
+        const error = assertApiError(res, 500, 'INTERNAL');
+        assert.deepEqual(Object.keys(res.body as object), ['error']);
+        assert.equal(error.message, 'Something went wrong on our end');
+        assert.equal(res.headers.get('x-powered-by'), null);
+
+        const wire = JSON.stringify(res.body);
+        for (const leak of ['services', 'relation', 'SELECT', '42P01', 'debug', 'stack', 'node_modules', '.ts:', 'at ']) {
+          assert.ok(!wire.includes(leak), `the response must not contain "${leak}"`);
+        }
+      } finally {
+        await app.db.query('ALTER TABLE services_gone_for_test RENAME TO services');
+      }
+    });
+
     it('does not expose a constraint name when the database reports a unique violation', async () => {
       const failing = fail(
         Object.assign(new Error('duplicate key value violates unique constraint "users_business_email_key"'), {

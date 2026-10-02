@@ -88,6 +88,12 @@ describe('auth', () => {
       assert.equal('passwordHash' in user || 'password_hash' in user, false, 'the hash must never be serialised');
       assert.ok(client.cookie('appt_access'));
       assert.ok(client.cookie('appt_refresh'));
+
+      const { rows } = await app.db.query<{ password_hash: string }>('SELECT password_hash FROM users WHERE id = $1', [
+        user.id,
+      ]);
+      assert.match(rows[0]!.password_hash, /^\$2[aby]\$12\$/, 'stored as a cost-12 bcrypt hash');
+      assert.notEqual(rows[0]!.password_hash, STRONG_PASSWORD);
     });
 
     it('gives a new tenant a default service catalogue so booking works immediately', async () => {

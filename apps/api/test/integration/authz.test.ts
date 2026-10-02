@@ -8,10 +8,50 @@ import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient } from '../helpers/apiClient.js';
 
 /**
- * Cross-cutting authorisation checks: every protected endpoint at once, so a
- * route added without requireAuth, or one that trusts an identity in its body,
- * fails here even if its own test file forgot to look.
+ * Cross-cutting authorisation checks: every protected endpoint at once, so one
+ * that trusts an identity in its body, or answers without a session, fails
+ * here even if its own test file forgot to look. The list of protected
+ * endpoints is checked against the routes Express actually registers, so a new
+ * route must be added to the 401 sweep (or to PUBLIC_ROUTES) or this file fails.
  */
+
+/** The only routes reachable without a session. */
+const PUBLIC_ROUTES = [
+  'GET /api/health',
+  'POST /api/auth/signup',
+  'POST /api/auth/login',
+  'POST /api/auth/refresh',
+  'POST /api/auth/logout',
+];
+
+interface Layer {
+  route?: { path: string | string[]; methods: Record<string, boolean> };
+  regexp: RegExp;
+  handle: { stack?: Layer[] };
+}
+
+/** Every "METHOD /path" the Express app registers under /api, with params as ":name". */
+function registeredApiRoutes(app: { _router: { stack: Layer[] } }): string[] {
+  // Express 4 keeps a router's mount path only as a regexp: /^\/api\/chat\/?(?=\/|$)/i.
+  const mountOf = (layer: Layer) =>
+    layer.regexp.source.replace(/^\^/, '').replace('\\/?(?=\\/|$)', '').replace(/\\\//g, '/');
+  const routes: string[] = [];
+  const walk = (stack: Layer[], prefix: string) => {
+    for (const layer of stack) {
+      if (layer.route) {
+        const paths = Array.isArray(layer.route.path) ? layer.route.path : [layer.route.path];
+        for (const path of paths) {
+          for (const method of Object.keys(layer.route.methods)) routes.push(`${method.toUpperCase()} ${prefix}${path}`);
+        }
+      } else if (layer.handle.stack) {
+        walk(layer.handle.stack, prefix + mountOf(layer));
+      }
+    }
+  };
+  walk(app._router.stack, '');
+  return routes.filter((r) => / \/api\//.test(r)).map((r) => r.replace(/\/$/, ''));
+}
+
 describe('authorisation across the API', () => {
   let app: TestApp;
   let customer: ApiClient;
@@ -51,6 +91,23 @@ describe('authorisation across the API', () => {
   ];
 
   describe('without a session', () => {
+    it('sweeps every registered /api route except the public ones', async () => {
+      const { createApp } = await import('../../src/app.js');
+      const registered = registeredApiRoutes(createApp() as never);
+      for (const route of PUBLIC_ROUTES) assert.ok(registered.includes(route), `${route} is no longer registered`);
+
+      const swept = protectedEndpoints();
+      const unswept = registered
+        .filter((route) => !PUBLIC_ROUTES.includes(route))
+        .filter((route) => {
+          const [method, pattern] = route.split(' ') as [string, string];
+          const matcher = new RegExp(`^${pattern.replace(/:[^/]+/g, '[^/]+')}$`);
+          return !swept.some(([m, path]) => m === method && matcher.test(path.split('?')[0]!));
+        });
+      assert.deepEqual(unswept, [], 'add these to protectedEndpoints() or PUBLIC_ROUTES');
+      assert.equal(registered.length, PUBLIC_ROUTES.length + swept.length, 'one sweep entry per protected route');
+    });
+
     it('answers 401 on every protected endpoint, with nothing but the error envelope', async () => {
       const anon = app.client();
       for (const [method, path, body] of protectedEndpoints()) {
