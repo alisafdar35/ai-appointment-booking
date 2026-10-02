@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+.env
+.env.local
+.env.*.local
+!.env.example
+
+.DS_Store
+*.log
+npm-debug.log*
+coverage/
+.vercel
+.turbo
+
+# Editor workspaces are personal
+*.code-workspace

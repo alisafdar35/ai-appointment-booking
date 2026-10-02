@@ -1,0 +1,60 @@
+# Render Blueprint for the API (https://render.com/docs/blueprint-spec).
+# The web app deploys to Vercel and the database is managed Postgres (Neon);
+# see docs/deployment.md for the full walkthrough.
+services:
+  - type: web
+    name: slotly-api
+    runtime: node
+    plan: free
+    region: oregon
+    # Rebuild only when something the API is built from changes, not on every
+    # web-only commit.
+    buildFilter:
+      paths:
+        - apps/api/**
+        - packages/shared/**
+        - db/**
+        - package.json
+        - package-lock.json
+        - render.yaml
+    # npm workspaces: install and build from the repo root so @appt/shared is
+    # compiled before the API that imports it. --include=dev because NODE_ENV is
+    # production here and the TypeScript compiler is a dev dependency.
+    buildCommand: npm ci --include=dev && npm run build:api
+    # Forward-only migrations run before every boot. They are idempotent (ledger
+    # table + checksums), so a restart applies nothing. Done in startCommand
+    # rather than preDeployCommand because the free plan has no pre-deploy step;
+    # with multiple instances this should move to a one-off release job.
+    # The seed is deliberately NOT run here: it is a one-time demo step
+    # (docs/deployment.md, "Seed the demo data").
+    startCommand: npm run db:migrate:prod -w @appt/api && npm start -w @appt/api
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false # Neon pooled connection string, set in the dashboard
+      - key: DATABASE_SSL
+        value: "true"
+      - key: PG_POOL_MAX
+        value: "5"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        sync: false # the Vercel origin, exact, e.g. https://slotly.vercel.app
+      - key: CROSS_SITE_COOKIES
+        value: "false" # the web app proxies /api, so cookies are first-party
+      # Browser -> Vercel (the /api rewrite) -> Render's edge -> this process.
+      # Each proxy appends to X-Forwarded-For, so the client is two hops back.
+      # With 1, every user would share Vercel's egress address and one per-IP
+      # rate-limit budget. Raise or lower it only if that chain changes.
+      - key: TRUST_PROXY_HOPS
+        value: "2"
+      - key: MISTRAL_API_KEY
+        sync: false # optional: without it the app runs on the deterministic engine
+      - key: MISTRAL_MODEL
+        value: ministral-8b-latest # same as the code default; see config/env.ts
+      - key: LOG_LEVEL
+        value: info

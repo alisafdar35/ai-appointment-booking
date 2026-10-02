@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build, typecheck, lint, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # Same image, credentials and port as docker-compose.yml, so the API test
+      # harness finds it at its default address. The harness creates its own
+      # appt_test* databases (and needs superuser for CREATE DATABASE/EXTENSION,
+      # which the image's POSTGRES_USER is).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: appt
+          POSTGRES_PASSWORD: appt_local_dev
+          POSTGRES_DB: appt
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U appt -d appt"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_DATABASE_URL: postgresql://appt:appt_local_dev@localhost:5433/appt_test
+      # Next.js reads these at build time; the build does not contact the API.
+      API_ORIGIN: http://localhost:4000
+      NEXT_PUBLIC_SOCKET_URL: http://localhost:4000
+      NEXT_TELEMETRY_DISABLED: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build shared contract
+        run: npm run build:shared
+
+      - name: Typecheck (API, API tests, web)
+        run: |
+          npm run typecheck -w @appt/api
+          npm run typecheck:test -w @appt/api
+          npm run typecheck -w @appt/web
+
+      - name: Lint web
+        run: npm run lint
+
+      - name: API tests (unit + integration against Postgres)
+        run: npm test -w @appt/api
+
+      - name: Web unit tests
+        run: npm test -w @appt/web
+
+      - name: Build API
+        run: npm run build -w @appt/api
+
+      - name: Build web
+        run: npm run build -w @appt/web

@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens. Values are space-separated RGB channels so Tailwind can apply
+ * an alpha (`bg-accent/10`). Components use the semantic names only; dark mode
+ * is this block being redefined, not a parallel set of classes.
+ *
+ * Contrast (WCAG AA, checked for each text/background pair used):
+ *   text on surface/background >= 4.5:1, UI boundaries (--input) >= 3:1.
+ */
+@layer base {
+  :root {
+    color-scheme: light;
+
+    --background: 248 250 252;
+    --surface: 255 255 255;
+    --muted: 241 245 249;
+    --muted-foreground: 71 85 105;
+    --foreground: 15 23 42;
+    --border: 226 232 240;
+    --input: 116 129 150;
+    --ring: 99 102 241;
+    --shadow: 15 23 42;
+
+    --accent: 79 70 229;
+    --accent-hover: 67 56 202;
+    --accent-foreground: 255 255 255;
+    --accent-subtle: 238 242 255;
+    --accent-text: 67 56 202;
+    --accent-border: 199 210 254;
+
+    --success: 21 128 61;
+    --success-subtle: 240 253 244;
+    --success-text: 21 101 52;
+    --success-border: 187 247 208;
+
+    --warning: 180 83 9;
+    --warning-subtle: 255 251 235;
+    --warning-text: 146 64 14;
+    --warning-border: 253 230 138;
+
+    --danger: 220 38 38;
+    --danger-hover: 185 28 28;
+    --danger-foreground: 255 255 255;
+    --danger-subtle: 254 242 242;
+    --danger-text: 185 28 28;
+    --danger-border: 254 202 202;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+
+      --background: 2 6 23;
+      --surface: 15 23 42;
+      --muted: 30 41 59;
+      --muted-foreground: 148 163 184;
+      --foreground: 241 245 249;
+      --border: 30 41 59;
+      --input: 100 116 139;
+      --ring: 129 140 248;
+      --shadow: 0 0 0;
+
+      --accent: 79 70 229;
+      --accent-hover: 91 90 240;
+      --accent-subtle: 30 27 75;
+      --accent-text: 165 180 252;
+      --accent-border: 55 48 163;
+
+      --success: 21 128 61;
+      --success-subtle: 5 46 22;
+      --success-text: 134 239 172;
+      --success-border: 22 101 52;
+
+      --warning: 180 83 9;
+      --warning-subtle: 69 26 3;
+      --warning-text: 252 211 77;
+      --warning-border: 146 64 14;
+
+      --danger-subtle: 69 10 10;
+      --danger-text: 252 165 165;
+      --danger-border: 153 27 27;
+    }
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-padding-top: 5rem; /* keeps anchored content clear of the sticky header */
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    min-height: 100dvh;
+  }
+
+  ::selection {
+    @apply bg-accent/20;
+  }
+
+  ::placeholder {
+    @apply text-muted-foreground/90;
+  }
+
+  /*
+   * One focus style for everything. An outline (not a box-shadow ring) so it
+   * survives forced-colors mode and never fights an element's own shadow.
+   */
+  :focus-visible {
+    outline: 2px solid rgb(var(--ring));
+    outline-offset: 2px;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+
+    /* A spinner is state feedback, not decoration: slow it down, don't freeze it. */
+    .animate-spin {
+      animation-duration: 1.6s !important;
+      animation-iteration-count: infinite !important;
+    }
+  }
+}

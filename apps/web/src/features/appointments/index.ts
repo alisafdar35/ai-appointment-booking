@@ -1,0 +1,1 @@
+export { AppointmentsDashboard } from './AppointmentsDashboard';
