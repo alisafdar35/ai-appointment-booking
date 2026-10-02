@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 const compat = new FlatCompat({ baseDirectory: dirname(fileURLToPath(import.meta.url)) });
 
 const config = [
-  { ignores: ['.next/**', 'node_modules/**', 'playwright-report/**', 'test-results/**', 'next-env.d.ts'] },
+  { ignores: ['.next/**', '.next-e2e/**', 'node_modules/**', 'playwright-report/**', 'test-results/**', 'next-env.d.ts'] },
   ...compat.extends('next/core-web-vitals', 'next/typescript'),
   {
     rules: {

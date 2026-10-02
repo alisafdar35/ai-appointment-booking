@@ -1,24 +1,30 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * No `webServer` block on purpose: the suite runs against an already-running
- * stack so a failing test never hides a failing server start. Point
- * E2E_BASE_URL elsewhere to test a deployment.
+ * The suite runs against a stack built and booted for it, from the repo root:
  *
- * The stack under test:
+ *   npm run e2e                        reset DB, build, boot, test, tear down
+ *   npm run e2e -- --project=mobile    extra arguments reach Playwright
  *
- *   MISTRAL_API_KEY= RATE_LIMIT_DISABLED=true npm run dev:api
- *   npm run build:web && npm run start -w @appt/web
- *   npm run e2e                     (from the repo root)
+ * scripts/e2e.mjs recreates the `appt_e2e` database (migrated with the real
+ * runner, then seeded), starts the API on :4100 and the production web build
+ * on :3100, runs this config with E2E_BASE_URL pointing there, and stops both
+ * servers however the run ends. There is no `webServer` block: one script owns
+ * the whole stack, so a failing server start is reported as such rather than
+ * as a failing test.
  *
- * - No Mistral key: every assistant reply then comes from the deterministic
- *   guided engine, so a message is always read the same way. The preflight
- *   (e2e/support/preflight.ts) refuses to run otherwise.
+ * - No Mistral key: every assistant reply comes from the deterministic guided
+ *   engine, so a message is always read the same way. The preflight
+ *   (e2e/support/preflight.ts) refuses any stack with a model configured.
  * - Rate limits off: the specs sign in, refresh and chat far faster than a
  *   person, all from one IP, and would trip the per-IP refresh budget.
- * - Data: specs sign up their own customers and book free slots read from the
- *   live availability endpoint, so they run in parallel against a used
- *   development database (`npm run db:seed` provides the Bluewave tenant).
+ * - Data: a fresh database per run. Specs sign up their own customers and
+ *   book on their worker's own days (laneDays in e2e/support/api.ts), so
+ *   parallel tests never compete for a slot.
+ *
+ * `npm run e2e:run` runs only Playwright, against E2E_BASE_URL (default
+ * http://localhost:3000): for debugging against a stack started by hand, which
+ * then has to meet the same conditions.
  */
 export default defineConfig({
   testDir: './e2e',

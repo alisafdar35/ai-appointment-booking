@@ -7,7 +7,7 @@ import {
   findOpenSlot,
   longDate,
   newAccount,
-  pickAtRandom,
+  otherFreeTime,
   signUpCustomer,
   spokenDate,
   spokenTime,
@@ -28,14 +28,15 @@ import {
  * Determinism: the stack runs without a Mistral key (the preflight enforces
  * it), so every reply comes from the rule-based guided engine; each test signs
  * up its own customer; and every date is a free slot read from the live
- * availability endpoint, on a business day in the business's timezone.
+ * availability endpoint, on this worker's own business days (laneDays in
+ * support/api.ts), in the business's timezone.
  */
 
 test.describe('booking by conversation', () => {
   test('collects the details, takes a correction, books, and puts it on the dashboard', async ({ page }) => {
     const api = await signUpCustomer(page);
     const slot = await findOpenSlot(api, 'Routine Checkup', { atLeastFree: 2 });
-    const corrected = pickAtRandom(slot.freeTimes.filter((time) => time !== slot.time));
+    const corrected = otherFreeTime(slot);
 
     await page.goto('/assistant');
 

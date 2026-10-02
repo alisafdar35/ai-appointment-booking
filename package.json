@@ -21,7 +21,8 @@
     "setup": "npm install && npm run db:up && npm run db:migrate && npm run db:seed",
     "typecheck": "npm run build:shared && npm run typecheck -w @appt/api && npm run typecheck -w @appt/web",
     "lint": "npm run lint -w @appt/web",
-    "e2e": "npm run e2e -w @appt/web",
+    "e2e": "node scripts/e2e.mjs",
+    "e2e:run": "npm run e2e -w @appt/web",
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {

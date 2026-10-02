@@ -1,18 +1,19 @@
+import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-import { ApiClient, clockTime, findOpenSlot, newAccount, pickAtRandom, signUpCustomer } from './support/api';
+import { ApiClient, clockTime, findOpenSlot, newAccount, otherFreeTime, signUpCustomer } from './support/api';
 import { SEEDED_USERS, signInViaApi } from './support/session';
 
 /**
  * The appointments dashboard: the booking dialog, cancelling, and the staff
- * view. Each test has its own customer and its own free slot (see
- * support/api.ts), so they can run in parallel and against a used database.
+ * view. Each test has its own customer and books on its own worker's days (see
+ * laneDays in support/api.ts), so they can run in parallel.
  */
 
 test.describe('booking from the dashboard', () => {
   test('books from the dialog, and recovers when the chosen time is taken first', async ({ page, request }) => {
     const api = await signUpCustomer(page);
     const slot = await findOpenSlot(api, 'Routine Checkup', { atLeastFree: 2 });
-    const fallback = pickAtRandom(slot.freeTimes.filter((time) => time !== slot.time));
+    const fallback = otherFreeTime(slot);
 
     await page.goto('/appointments');
     await expect(page.getByText('Nothing coming up')).toBeVisible();
@@ -72,18 +73,22 @@ test.describe('cancelling', () => {
 
 test.describe('staff view', () => {
   test('shows every booking at the business with the customer it belongs to', async ({ page, request }) => {
-    const account = newAccount('Amara Okafor');
+    // A name no other booking carries, so the card is found by its customer
+    // wherever it falls in the list. The database is recreated for each run,
+    // which keeps the business far below the list's 100-booking page.
+    const account = newAccount(`Amara Okafor ${randomUUID().slice(0, 6)}`);
     const customer = await ApiClient.connect(request, account, { signUp: true });
-    // The earliest free slot keeps the booking near the top of the soonest-first list.
-    const slot = await findOpenSlot(customer, 'Emergency Consult', { earliest: true });
+    const slot = await findOpenSlot(customer, 'Emergency Consult');
     await customer.book({ serviceId: slot.service.id, date: slot.date, time: slot.time });
 
     await signInViaApi(page, SEEDED_USERS.staff);
     await page.goto('/appointments');
 
     await expect(page.getByText('Every booking at Bluewave Dental, with the customer it belongs to.')).toBeVisible();
-    const card = page.getByRole('article').filter({ hasText: account.email });
-    await expect(card).toContainText('Amara Okafor');
+    const card = page.getByRole('article').filter({ hasText: account.fullName });
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText(account.email);
     await expect(card).toContainText('Emergency Consult');
+    await expect(card).toContainText(`${clockTime(slot.time)} – `);
   });
 });

@@ -10,9 +10,11 @@ Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next
 
 | | |
 |---|---|
-| Web app | **`<WEB_URL — e.g. https://slotly.vercel.app>`** |
-| API health | **`<API_URL>/health`** (DB status, active AI provider, uptime; per-tenant AI usage is at the owner-only `GET /api/ai/summary`) |
-| Demo video | **`<VIDEO_URL>`** |
+| Web app | **https://ai-appointment-booking-psi.vercel.app** |
+| API health | **https://slotly-api-r5g6.onrender.com/health** (DB status, active AI provider, uptime; per-tenant AI usage is at the owner-only `GET /api/ai/summary`) |
+| Demo video | _coming soon_ |
+
+> The API runs on Render's free plan, which sleeps after 15 minutes idle: the first request after a pause can take ~30–60 s while it wakes. Everything is fast after that.
 | Repository | https://github.com/alisafdar35/ai-appointment-booking |
 
 **Demo logins** (password for all: `Password123!`)
@@ -158,6 +160,7 @@ apps/
     e2e/              Playwright specs (desktop + mobile projects)
 packages/shared       zod schemas, DTO types, ERROR_CODES, SOCKET_EVENTS
 db/                   migrations/001–006, seed.sql, verify.sql
+scripts/              e2e.mjs (fresh database + own stack + Playwright), wait-for-db.mjs
 docs/                 architecture, api, database, ai-integration, frontend, decisions, deployment, demo script, checklist
 ```
 
@@ -217,7 +220,7 @@ Web (`apps/web`, read by Next.js **at build time**):
 |---|---|---|
 | `API_ORIGIN` | `http://localhost:4000` | Where the Next.js server proxies `/api/*` |
 | `NEXT_PUBLIC_SOCKET_URL` | `http://localhost:4000` | Socket.IO origin the browser connects to. Also added to the CSP `connect-src` |
-| `E2E_BASE_URL` | `http://localhost:3000` | Playwright target (e2e only) |
+| `E2E_BASE_URL` | `http://localhost:3000` | Playwright target for `npm run e2e:run`. `npm run e2e` sets it to its own web app |
 
 ---
 
@@ -227,17 +230,18 @@ Web (`apps/web`, read by Next.js **at build time**):
 |---|---|---|---|
 | API unit + integration | `npm test -w @appt/api` | **589 tests**, 22 files, all passing (~28 s) | Postgres on :5433 (creates throwaway `appt_test*` databases) |
 | Web unit/component | `npm test -w @appt/web` | **439 tests**, 39 files, all passing (~7 s) | nothing |
-| End-to-end (Playwright) | `npm run e2e` | **50 tests**: 25 scenarios × desktop and mobile Chrome, 6 spec files | a running stack (below) |
+| End-to-end (Playwright) | `npm run e2e` | **50 tests**: 25 scenarios × desktop and mobile Chrome, 6 spec files, all passing (~1 min incl. build) | Postgres on :5433, ports 3100 and 4100 free |
 | Types + lint | `npm run typecheck && npm run lint` | clean | — |
 
 - The **API integration tests** run the real `createApp()` over HTTP, against a database built by the production migration runner and `db/seed.sql`. Mistral is exercised through a local stub that speaks the chat-completions protocol. Details: [apps/api/test/README.md](apps/api/test/README.md).
-- **E2E** runs against a live stack on purpose, and it refuses to start unless the API is on the deterministic engine, so assertions stay stable:
+- **E2E** brings up a stack of its own. `npm run e2e` ([scripts/e2e.mjs](scripts/e2e.mjs)) drops and recreates the `appt_e2e` database (it refuses any name not ending in `_e2e`, and any non-local host), migrates it with the real runner and seeds it, builds everything, starts the API on :4100 and the production web build on :3100, waits for both to be healthy, runs Playwright, and stops both servers even when a test fails or the run is interrupted. A development stack on :3000/:4000 is left alone, and the web build goes to `apps/web/.next-e2e`, not `.next`.
   ```bash
-  MISTRAL_API_KEY= RATE_LIMIT_DISABLED=true npm run dev:api
-  npm run build:web && npm run start -w @appt/web
-  npm run e2e
+  npm run e2e                           # the whole suite, desktop + mobile
+  npm run e2e -- --project=desktop      # extra arguments go to Playwright
+  npm run e2e -- --skip-build           # reuse the last build; the database is still recreated
   ```
-- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, typecheck, lint, API tests with a Postgres 16 service, web tests and the API and web production builds on every push and PR. E2E is not in CI yet (see limitations).
+  The API runs with no Mistral key (a preflight refuses any stack with a model, so every reply comes from the deterministic engine) and with rate limits off. Each Playwright worker books only on its own business days (`laneDays` in [e2e/support/api.ts](apps/web/e2e/support/api.ts)), so parallel tests never compete for a slot. `npm run e2e:run` runs Playwright alone against `E2E_BASE_URL`, for debugging a stack started by hand.
+- **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs build, typecheck, lint, API tests with a Postgres 16 service, web tests and the API and web production builds on every push and PR, and a second job runs `npm run e2e` against its own Postgres service.
 
 ---
 
@@ -283,7 +287,6 @@ These are deliberate scope cuts, each checked against the code:
 - **No email verification, password reset or tenant settings UI** (hours and timezone are seed or DB values).
 - **AI:** only *dates* from the model are cross-checked by code. Model *times* are validated for format and business hours, not re-derived. There is no circuit breaker.
 - **Ops:** migrations run in Render's `startCommand` (fine for one instance). Expired refresh tokens are never swept, although the index for that job exists. Certificate-verified TLS (`DATABASE_SSL=true`) has not yet been exercised against Neon. The production CSP allows `'unsafe-inline'` scripts (a Next.js limitation without nonces).
-- **E2E runs locally, not in CI.** Specs book real slots, so on a long-used development database (hundreds of leftover e2e bookings) parallel workers can collide on the few free on-the-hour slots and a spec fails; on a freshly seeded database the suite is stable.
 
 ## What I'd do next
 
@@ -292,7 +295,7 @@ These are deliberate scope cuts, each checked against the code:
 3. A resources model (staff/rooms), weekly hours and closures. The EXCLUDE constraint moves to `(resource_id, slot)`.
 4. Keyset pagination for appointments and transcripts (the indexes already support it).
 5. Cross-check model times the way dates are checked, and build an offline eval set from `ai_interaction_logs` + `chat_messages.tool_calls`.
-6. E2E in CI against an ephemeral stack. A scheduled job to sweep expired refresh tokens and partition AI logs by month.
+6. A scheduled job to sweep expired refresh tokens and partition AI logs by month.
 7. Reschedule flow, email confirmations with the `.ics` already generated client-side, and a tenant settings page.
 
 ## Documentation

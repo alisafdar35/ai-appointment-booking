@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, type APIRequestContext, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import type { AppointmentDto, AvailabilityDto, ServiceDto, UserDto } from '@appt/shared';
 
 /**
@@ -112,6 +112,24 @@ export function weekdaysAfter(fromIso: string, count: number): string[] {
   return days;
 }
 
+/**
+ * Booking days are split into lanes, one per parallel worker slot.
+ *
+ * Playwright guarantees that tests running at the same time have different
+ * `parallelIndex` values, so a test only ever books on its own lane's days and
+ * no two concurrent tests can reach for the same slot. Tests that share a lane
+ * run one after another, and each reads availability after the previous one
+ * booked, so they cannot collide either. Together with a database recreated for
+ * every run (scripts/e2e.mjs) that makes slot choice deterministic.
+ */
+const DAYS_PER_LANE = 3;
+
+/** This worker's booking days: the next weekdays in the business's timezone, `DAYS_PER_LANE` per lane. */
+export function laneDays(): string[] {
+  const lane = test.info().parallelIndex;
+  return weekdaysAfter(todayIn(BLUEWAVE.timeZone), (lane + 1) * DAYS_PER_LANE).slice(lane * DAYS_PER_LANE);
+}
+
 export interface OpenSlot {
   service: ServiceDto;
   date: string;
@@ -123,36 +141,29 @@ export interface OpenSlot {
 const onTheHour = (time: string) => time.endsWith(':00');
 
 /**
- * A free slot from the live availability endpoint, on one of the next business
- * days in the business's timezone.
- *
- * The dev database keeps every booking earlier runs made, and specs run in
- * parallel, so the slot is chosen at random among the free ones rather than
- * "first free" (which every parallel spec would pick at once). Times on the hour
- * keep what a spec types plain ("at 2pm").
+ * The earliest free slot on this worker's lane days (see laneDays), read from
+ * the live availability endpoint. Times on the hour keep what a spec types
+ * plain ("at 2pm").
  */
 export async function findOpenSlot(
   api: ApiClient,
   serviceName: string,
-  { atLeastFree = 1, earliest = false }: { atLeastFree?: number; earliest?: boolean } = {},
+  { atLeastFree = 1 }: { atLeastFree?: number } = {},
 ): Promise<OpenSlot> {
   const service = await api.service(serviceName);
-  const days = weekdaysAfter(todayIn(BLUEWAVE.timeZone), 15);
-  const candidates: OpenSlot[] = [];
+  const days = laneDays();
   for (const date of days) {
     const freeTimes = (await api.freeTimes(service.id, date)).filter(onTheHour);
-    if (freeTimes.length < atLeastFree) continue;
-    const slots = freeTimes.map((time) => ({ service, date, time, freeTimes }));
-    if (earliest) return slots[0]!;
-    candidates.push(...slots);
+    if (freeTimes.length >= atLeastFree) return { service, date, time: freeTimes[0]!, freeTimes };
   }
-  expect(candidates.length, `free ${serviceName} slots in the next three weeks`).toBeGreaterThan(0);
-  return pickAtRandom(candidates);
+  throw new Error(`No day in this worker's lane (${days.join(', ')}) has ${atLeastFree} free ${serviceName} slot(s)`);
 }
 
-/** Random rather than first, for the same reason as findOpenSlot: parallel specs must not converge. */
-export function pickAtRandom<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)]!;
+/** Another free time on the slot's day, for specs that change or lose the first choice. */
+export function otherFreeTime(slot: OpenSlot): string {
+  const other = slot.freeTimes.find((time) => time !== slot.time);
+  expect(other, `a second free time on ${slot.date}`).toBeDefined();
+  return other!;
 }
 
 // ---- how the UI writes dates and times -----------------------------------------

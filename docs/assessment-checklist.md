@@ -2,7 +2,7 @@
 
 Every requirement line in the brief, with its status and the evidence. **Done** means implemented and covered by tests or manual verification. **Partial** and **Not yet** are explained.
 
-Test counts are from the latest local run: API 589 passing (22 files), web 439 passing (39 files). The e2e suite has 50 tests (25 scenarios × 2 viewports), run locally against a live stack: 50/50 on one run, but on a development database already holding hundreds of e2e bookings, parallel specs occasionally collide on the same free slot (see the README's known limitations).
+Test counts are from the latest local run: API 589 passing (22 files), web 439 passing (39 files). The e2e suite has 50 tests (25 scenarios × 2 viewports). `npm run e2e` runs it against its own freshly seeded database and stack, and it passed 50/50 on three consecutive runs.
 
 ## Submission
 
@@ -107,4 +107,4 @@ Test counts are from the latest local run: API 589 passing (22 files), web 439 p
 | Quality of UI implementation and usability | [frontend.md](frontend.md), [screenshots](screenshots), Playwright specs |
 | Realistic use of AI in a product workflow | [ai-integration.md](ai-integration.md) |
 | Ability to explain and defend tradeoffs | ADRs, each with "Alternatives" and "Cost" |
-| Testing (not asked; included) | 589 API + 439 web + 50 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e not in CI) |
+| Testing (not asked; included) | 589 API + 439 web + 50 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e included) |

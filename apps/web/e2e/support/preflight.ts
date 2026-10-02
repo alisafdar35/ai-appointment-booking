@@ -15,7 +15,9 @@ export default async function preflight(config: FullConfig): Promise<void> {
   try {
     const response = await context.get('/api/health').catch(() => null);
     if (!response?.ok()) {
-      throw new Error(`No healthy stack at ${baseURL}. Start the API and web app first (see playwright.config.ts).`);
+      throw new Error(
+        `No healthy stack at ${baseURL}. Run \`npm run e2e\` from the repo root, which starts one (see playwright.config.ts).`,
+      );
     }
     const health = (await response.json()) as { aiProvider?: string };
     if (health.aiProvider !== 'fallback-only') {

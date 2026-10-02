@@ -78,3 +78,58 @@ jobs:
 
       - name: Build web
         run: npm run build -w @appt/web
+
+  e2e:
+    name: End-to-end (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      # The same Postgres service as above. scripts/e2e.mjs creates its own
+      # appt_e2e database on it, migrates and seeds it, and boots the API
+      # (:4100, no Mistral key) and the production web build (:3100) itself.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: appt
+          POSTGRES_PASSWORD: appt_local_dev
+          POSTGRES_DB: appt
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U appt -d appt"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      E2E_LOG_DIR: ${{ runner.temp }}/slotly-e2e
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Chromium for Playwright
+        run: npm exec -w @appt/web -- playwright install --with-deps chromium
+
+      - name: E2E (fresh database, own API and web app, desktop + mobile)
+        run: npm run e2e
+
+      - name: Upload report, traces and server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+            ${{ runner.temp }}/slotly-e2e
+          retention-days: 7

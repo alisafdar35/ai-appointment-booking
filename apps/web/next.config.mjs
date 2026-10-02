@@ -41,6 +41,9 @@ const securityHeaders = [
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // The e2e runner (scripts/e2e.mjs) builds into its own directory, pointed at
+  // its own API, so it never replaces a development build in .next.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   reactStrictMode: true,
   poweredByHeader: false,
   // @appt/shared ships compiled CommonJS; transpiling it lets Next bundle it
