@@ -87,6 +87,14 @@ export function nextDstTransition(timeZone: keyof typeof DST_RULES, kind: 'sprin
   throw new Error('unreachable: one of two consecutive years always has a future transition');
 }
 
+/**
+ * A date `daysAgo` before the real today. Always the real clock, never a
+ * pinned one (see clock.ts): "in the past" is decided by the database's now().
+ */
+export function pastDate(daysAgo: number, timeZone: string = SEED.bluewave.timezone): string {
+  return addDays(todayInZone(timeZone, new Date()), -daysAgo);
+}
+
 let nextOffset = 10;
 
 /**

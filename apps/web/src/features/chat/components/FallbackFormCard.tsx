@@ -206,7 +206,8 @@ export function FallbackFormCard({ reason, draft, onSubmit, onBooked, onClose }:
             value={time || null}
             label="Time"
             disabled={isSubmitting}
-            onChange={(next) => setValue('time', next, { shouldValidate: true })}
+            // Dirty, so a turn that changes the draft while the form is open cannot replace the user's pick.
+            onChange={(next) => setValue('time', next, { shouldValidate: true, shouldDirty: true })}
           />
           {errors.time?.message ? (
             <p role="alert" className="text-sm text-danger-text">

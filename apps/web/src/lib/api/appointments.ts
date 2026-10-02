@@ -1,5 +1,11 @@
 import type { z } from 'zod';
-import type { AppointmentDto, AppointmentStatus, createAppointmentSchema, listAppointmentsSchema } from '@appt/shared';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  type AppointmentDto,
+  type AppointmentStatus,
+  type createAppointmentSchema,
+  type listAppointmentsSchema,
+} from '@appt/shared';
 import { apiRequest } from './client';
 
 /** Request shapes use the schemas' *input* types: defaults such as `source` are applied server-side. */
@@ -17,9 +23,22 @@ export const appointmentsApi = {
   list: async (filters: AppointmentFilters = {}, signal?: AbortSignal): Promise<AppointmentDto[]> =>
     (await apiRequest<{ appointments: AppointmentDto[] }>('/appointments', { query: filters, signal })).appointments,
 
-  /** 409 SLOT_UNAVAILABLE if taken, 422 OUTSIDE_BUSINESS_HOURS / APPOINTMENT_IN_PAST. */
-  create: async (input: CreateAppointmentRequest): Promise<AppointmentDto> =>
-    (await apiRequest<{ appointment: AppointmentDto }>('/appointments', { method: 'POST', body: input })).appointment,
+  /**
+   * 409 SLOT_UNAVAILABLE if taken, 422 OUTSIDE_BUSINESS_HOURS / APPOINTMENT_IN_PAST.
+   *
+   * `idempotencyKey` names one booking attempt. Sending the same attempt again
+   * (a retry after a dropped connection, say) reuses the key, so a server that
+   * honours `Idempotency-Key` answers with the booking it already made instead
+   * of making a second one. A server that ignores the header loses nothing.
+   */
+  create: async (input: CreateAppointmentRequest, options: { idempotencyKey?: string } = {}): Promise<AppointmentDto> =>
+    (
+      await apiRequest<{ appointment: AppointmentDto }>('/appointments', {
+        method: 'POST',
+        body: input,
+        headers: options.idempotencyKey ? { [IDEMPOTENCY_KEY_HEADER]: options.idempotencyKey } : undefined,
+      })
+    ).appointment,
 
   /** 409 APPOINTMENT_NOT_CANCELLABLE when it is already cancelled or completed. */
   cancel: async (id: string, reason?: string): Promise<AppointmentDto> =>

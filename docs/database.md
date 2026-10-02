@@ -12,6 +12,8 @@ erDiagram
   businesses ||--o{ chat_sessions : "scopes"
   businesses ||--o{ ai_interaction_logs : "scopes"
   users ||--o{ refresh_tokens : "holds"
+  users ||--o{ idempotency_keys : "retries with (business_id, user_id)"
+  appointments |o--o{ idempotency_keys : "replayed as"
   users ||--o{ appointments : "books (business_id, user_id)"
   services ||--o{ appointments : "booked as (business_id, service_id)"
   users ||--o{ chat_sessions : "owns (business_id, user_id)"
@@ -26,6 +28,7 @@ erDiagram
     text timezone "IANA"
     time opens_at
     time closes_at "CHECK > opens_at"
+    smallint_array open_days "ISO weekdays, default all"
   }
   users {
     uuid id PK
@@ -43,6 +46,7 @@ erDiagram
     timestamptz expires_at
     timestamptz revoked_at
     uuid replaced_by FK "rotation chain"
+    boolean abandoned "unused successor of a lost rotation"
   }
   services {
     uuid id PK
@@ -85,6 +89,15 @@ erDiagram
     text engine "mistral|fallback|system"
     jsonb meta "{action, suggestions, missing, draft, appointmentId}"
   }
+  idempotency_keys {
+    uuid business_id PK
+    uuid user_id PK
+    text key PK "printable ASCII 1..255"
+    bytea request_hash "SHA-256 of the validated body"
+    uuid appointment_id FK
+    jsonb response "the original 201 body"
+    timestamptz created_at "honoured 24 h"
+  }
   ai_interaction_logs {
     bigserial id PK
     uuid business_id FK
@@ -105,13 +118,14 @@ erDiagram
 
 | Table | Purpose | Key constraints |
 |---|---|---|
-| `businesses` | Tenant root. Holds the booking policy (timezone, opening hours) the AI and availability read | `slug` citext unique with format CHECK; `closes_at > opens_at` |
+| `businesses` | Tenant root. Holds the booking policy (timezone, opening hours, open weekdays) the AI and availability read | `slug` citext unique with format CHECK; `closes_at > opens_at`; `open_days` non-empty subset of 1–7 ([007](../db/migrations/007_business_open_days.sql)) |
 | `users` | Authentication and profile | `UNIQUE (business_id, email)`, because email is unique **per tenant** (the same person can use two businesses); `UNIQUE (business_id, id)` as the target for composite FKs; email and phone format CHECKs |
-| `refresh_tokens` | Rotating, server-side refresh tokens | Only the SHA-256 is stored (`token_hash` unique); `revoked_at` + `replaced_by` keep the rotation chain so a replay can be told apart from a multi-tab race; `expires_at > created_at` |
+| `refresh_tokens` | Rotating, server-side refresh tokens | Only the SHA-256 is stored (`token_hash` unique); `revoked_at` + `replaced_by` keep the rotation chain so a replay can be told apart from a multi-tab race or a lost response; `abandoned` ([010](../db/migrations/010_refresh_token_abandoned.sql)) marks a successor revoked because its response never arrived; `expires_at > created_at` |
 | `services` | Bookable catalogue. `duration_minutes` means the AI only has to extract a start time | `UNIQUE (business_id, name)`, `UNIQUE (business_id, id)`, duration 5–480, price ≥ 0 |
 | `appointments` | Scheduling data and status | See below |
 | `chat_sessions` | One conversation, its status and the **booking draft** carried across turns | Composite FK to users; `booking_draft` must be a JSON object; `UNIQUE (business_id, id)` |
 | `chat_messages` | The transcript, including the raw tool-call extraction and the outcome of each turn (`meta`) | `engine IN ('mistral','fallback','system')`, content ≤ 8000, `tool_calls` must be an array and `meta` an object |
+| `idempotency_keys` | Replay store for `POST /api/appointments` with an `Idempotency-Key` ([008](../db/migrations/008_idempotency_keys.sql)) | PK `(business_id, user_id, key)` is the race lock; composite FK to users; `appointment_id` FK cascades; `request_hash` exactly 32 bytes |
 | `ai_interaction_logs` | One row per provider call: success, timeout, fallback, or guardrail correction | Non-negative latency/tokens; `guardrails` must be an array |
 
 ### `appointments` in detail
@@ -131,6 +145,7 @@ CONSTRAINT appointments_no_overlap EXCLUDE USING gist (
 - **Scope of the constraint:** it is per **service** ("one chair per service"), a prototype simplification. A real practice would constrain per practitioner or room.
 - **One customer, one place at a time.** [005](../db/migrations/005_appointments_customer_no_overlap.sql) adds `appointments_customer_no_overlap`, an `EXCLUDE` on `(business_id, user_id, slot)` with the same live-status predicate, so a customer cannot hold two overlapping bookings even for different services. Its violation becomes `409 CUSTOMER_BUSY`; the error handler tells the two constraints apart by name. Before adding it, the migration cancels the later-created booking of any overlapping pair, with a reason.
 - **Status lifecycle.** Rows are inserted `confirmed` (the API sets it explicitly). `confirmed → cancelled` is the only transition today, by the customer or staff. `completed` and `no_show` are reserved for a staff endpoint that does not exist yet, and `pending` for an approval flow, which is why the column defaults to `pending`. The `admin` source is display-only: clients may send only `chat` or `form`.
+- **One booking per conversation.** [009](../db/migrations/009_one_booking_per_chat_session.sql) adds the partial unique index `appointments_one_live_per_chat_session` on `chat_session_id` for live rows. The API's guarantee is the `chat_sessions` row lock every session-linked booking takes (see [ai-integration.md](ai-integration.md#guardrails), row 2); the index is the backstop for a writer that skips it, and its violation also becomes `409 SESSION_CLOSED`. The migration first cancels all but the earliest live booking of any conversation holding several (the seed holds one).
 - **Composite tenant FKs.** A row cannot reference a user, service or (since [003](../db/migrations/003_appointment_chat_session_tenant_fk.sql)) conversation in another tenant. `chat_session_id` uses `ON DELETE SET NULL (chat_session_id)`, so deleting a conversation never deletes the appointment it produced.
 - `ends_at > starts_at`; notes ≤ 2000; cancellation reason ≤ 500.
 - Native ENUMs for stable value sets (role, status, source, message role, session status). Adding a value is cheap; renaming one needs a migration.
@@ -158,7 +173,12 @@ Every index in [002_indexes.sql](../db/migrations/002_indexes.sql) names the que
 | `ai_logs_session_idx (session_id, created_at) WHERE session_id IS NOT NULL` | Debugging one conversation | manual / SQL |
 | `ai_logs_failures_idx (provider, created_at DESC) WHERE outcome <> 'ok'` | Reliability queries over the rare failures | manual / SQL |
 | `ai_logs_created_idx (created_at DESC)` | Windowed rollups | `getAiUsageSummary` (`GET /api/ai/summary`), which also filters on `business_id`; at higher volume a `(business_id, created_at)` index would replace it |
+| PK `(business_id, user_id, key)` on idempotency_keys | Claim-or-wait on a retried booking, then the replay lookup | `idempotency.claim`, `idempotency.find` |
+| `idempotency_keys_created_idx (created_at)` | Sweep of keys past their 24 h | *No sweep job exists yet* |
+| `idempotency_keys_appointment_idx (appointment_id)` (partial) | FK cascade when an appointment is deleted | the FK itself |
 | `users_business_created_idx (business_id, created_at DESC)` | Tenant user list | *No endpoint uses it yet; kept for an admin view* |
+
+Migration [007](../db/migrations/007_business_open_days.sql) adds `businesses.open_days`. It is read per row together with the hours, never searched, so it has no index. Migration [008](../db/migrations/008_idempotency_keys.sql) adds `idempotency_keys`; see ADR-020 for why the key row is inserted before the booking. Migration [009](../db/migrations/009_one_booking_per_chat_session.sql)'s unique index is looked up by the same `chat_session_id` the FK index serves. Migration [010](../db/migrations/010_refresh_token_abandoned.sql) adds `refresh_tokens.abandoned`, read only on the row already found by its hash.
 
 Migration [004](../db/migrations/004_chat_turn_meta.sql) adds `chat_messages.meta`, `ai_interaction_logs.guardrails` and the `'system'` engine. None of these is filtered on, so it adds no index. That is deliberate: they are read and written as whole values.
 
@@ -169,7 +189,7 @@ Migration [004](../db/migrations/004_chat_turn_meta.sql) adds `chat_messages.met
 - **Bounded reads everywhere.** Every list has a `LIMIT` (appointments ≤ 100, sessions 30, transcript newest 200, model history `AI_HISTORY_TURNS`), so response size and prompt cost are flat. The indexes are ordered for **keyset pagination** (`(user, starts_at)`, `(session_id, id)`). Adding a cursor is an API change, not a schema change. `chat_messages.id` is a `bigserial` so it doubles as a stable total order without a timestamp tiebreaker.
 - **Partial indexes** keep hot indexes small: live appointments only, active services only, failed AI calls only.
 - **Availability is one SQL statement** (`generate_series` over the day plus `NOT EXISTS` on the GIST index), not a loop in Node. "Is this free?" and "is this allowed?" use the same index and cannot disagree.
-- **`timestamptz` everywhere for instants**, converted from business wall-clock time by Postgres (`AT TIME ZONE`), which owns the IANA tz database. DST is tested in `availability.test.ts`.
+- **`timestamptz` everywhere for instants**, converted from business wall-clock time by Postgres (`AT TIME ZONE`), which owns the IANA tz database. Neither the API process's `TZ` nor the database session's `TimeZone` affects the result (`timezone-independence.test.ts`). DST is tested in `availability.test.ts` and `booking-integrity.test.ts`: a wall time inside a spring-forward gap is detected by converting the instant back (`(local AT TIME ZONE tz) AT TIME ZONE tz <> local`) and refused, rather than silently moved an hour; a repeated fall-back time takes Postgres's resolution, the second (standard-time) occurrence. Weekday closures (`open_days`) are judged on the business-local date.
 - **Counters are maintained on write.** `appendMessage` inserts the message and bumps `message_count`/`last_message_at` in one CTE, so the sidebar never counts rows.
 - **Connection pooling.** `pg.Pool` (`PG_POOL_MAX`, default 10). bcrypt runs before a transaction is opened, so slow hashing never holds a pooled connection. Use Neon's **pooled** connection string in production.
 - **AI logging is fire-and-forget.** A failed diagnostic insert never fails or slows a booking.
@@ -184,6 +204,7 @@ Migration [004](../db/migrations/004_chat_turn_meta.sql) adds `chat_messages.met
 | Many tenants | Row Level Security on `business_id`; per-tenant quotas; large tenants could move to their own schema without changing the composite-key design |
 | Connection count | PgBouncer / Neon pooler in transaction mode |
 | Refresh token table | Scheduled sweep using the partial `expires_at` index |
+| Idempotency keys | Scheduled `DELETE ... WHERE created_at < now() - interval '24 hours'` using `idempotency_keys_created_idx`; the API already treats older rows as free |
 
 ## Migrations workflow
 
@@ -229,4 +250,4 @@ Every block runs in a rolled-back transaction:
 5. Linking an appointment to another tenant's conversation is **rejected**.
 6. The dashboard query plan uses the index with no Sort.
 7. The same customer in two places at once (a different service) is **rejected**.
-8. Every live appointment sits inside its business's opening hours, in its timezone (expects 0 rows).
+8. Every live appointment sits inside its business's opening days and hours, in its timezone (expects 0 rows).

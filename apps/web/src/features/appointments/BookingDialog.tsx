@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { UseFormRegisterReturn } from 'react-hook-form';
 import { Controller, useForm } from 'react-hook-form';
 import type { AppointmentDto } from '@appt/shared';
@@ -9,11 +9,12 @@ import { Dialog } from '@/components/ui/Dialog';
 import { FormField } from '@/components/ui/FormField';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { Textarea } from '@/components/ui/Textarea';
-import { errorMessage } from '@/lib/api';
+import { errorMessage, onSessionExpired } from '@/lib/api';
 import { formatDateTime, todayInZone } from '@/lib/datetime';
 import { applyApiFieldErrors } from '@/lib/form-errors';
+import { saveInterruptedDraft } from '@/lib/interrupted-drafts';
 import { useCreateAppointment, useServices } from '@/lib/queries';
-import { useBusinessTimezone } from '@/providers/AuthProvider';
+import { useBusinessTimezone, useCurrentUser } from '@/providers/AuthProvider';
 import { useToast } from '@/providers/ToastProvider';
 import { DateField } from '@/features/booking/DateField';
 import { SlotPicker } from '@/features/booking/SlotPicker';
@@ -30,19 +31,42 @@ import {
 
 const NOTES_MAX = 2000; // createAppointmentSchema's limit
 
+/** Where the dialog keeps what was typed if the session ends before it is booked (lib/interrupted-drafts). */
+export const BOOKING_DRAFT_NAME = 'booking-dialog';
+
+const BLANK: BookingFormValues = { serviceId: '', date: '', time: '', notes: '', source: 'form' };
+
 interface BookingDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Called with the confirmed appointment, after the dialog has toasted and closed. */
   onBooked: (appointment: AppointmentDto) => void;
+  /** Values kept from a booking the session ended in the middle of; the form starts from them. */
+  restored?: BookingFormValues | null;
 }
 
-export function BookingDialog({ open, onOpenChange, onBooked }: BookingDialogProps) {
+export function BookingDialog({ open, onOpenChange, onBooked, restored = null }: BookingDialogProps) {
   // Subscribing while closed warms the cache, so the options are already
   // on screen (and focusable) the moment the dialog opens.
   useServices();
   // The body only exists while open, so each booking starts from a blank form.
-  return open ? <BookingDialogBody onOpenChange={onOpenChange} onBooked={onBooked} /> : null;
+  return open ? <BookingDialogBody onOpenChange={onOpenChange} onBooked={onBooked} restored={restored} /> : null;
+}
+
+/**
+ * One key per booking attempt, for `Idempotency-Key`. Submitting the same
+ * values again (Retry after a dropped connection) reuses it, so the server can
+ * recognise the repeat; changing anything is a different attempt with a new key.
+ */
+function useAttemptKey() {
+  const attempt = useRef<{ signature: string; key: string } | null>(null);
+  return (values: unknown): string => {
+    const signature = JSON.stringify(values);
+    if (attempt.current?.signature !== signature) {
+      attempt.current = { signature, key: crypto.randomUUID() };
+    }
+    return attempt.current.key;
+  };
 }
 
 /** The service cards, or the skeleton / retry that stands in for them. */
@@ -83,13 +107,18 @@ function ServiceOptions({
   return <ServicePicker services={query.data} registration={registration} invalid={invalid} />;
 }
 
-function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 'open'>) {
+function BookingDialogBody({ onOpenChange, onBooked, restored }: Omit<BookingDialogProps, 'open'>) {
   const formId = useId();
+  const user = useCurrentUser();
   const timezone = useBusinessTimezone();
   const toast = useToast();
   const services = useServices();
   const create = useCreateAppointment();
   const [formError, setFormError] = useState<string | null>(null);
+  const attemptKey = useAttemptKey();
+  // Set synchronously, before any await: a double click can deliver two submits
+  // before React re-renders the button as busy.
+  const submitting = useRef(false);
 
   // Fixed for the lifetime of the dialog: the schema must not change under a form mid-edit.
   const schema = useMemo(() => createBookingFormSchema(todayInZone(timezone)), [timezone]);
@@ -100,12 +129,20 @@ function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 
     setValue,
     setError,
     clearErrors,
+    getValues,
     watch,
-    formState: { errors },
+    formState: { errors, isSubmitting },
   } = useForm<BookingFormValues, unknown, BookingFormData>({
     resolver: zodResolver(schema),
-    defaultValues: { serviceId: '', date: '', time: '', notes: '', source: 'form' },
+    defaultValues: restored ? { ...BLANK, ...restored } : BLANK,
   });
+
+  // If the session ends while this is open, the page is about to swap for the
+  // sign-in form. Keep what was typed so signing in again brings it back.
+  useEffect(
+    () => onSessionExpired(() => saveInterruptedDraft(BOOKING_DRAFT_NAME, user.id, getValues())),
+    [user.id, getValues],
+  );
 
   const [serviceId, date, time, notes] = watch(['serviceId', 'date', 'time', 'notes']);
   const service = services.data?.find((candidate) => candidate.id === serviceId);
@@ -117,10 +154,13 @@ function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 
   };
 
   const onSubmit = async (values: BookingFormData) => {
-    if (create.isPending) return; // Enter in a field can submit again while a request is in flight
+    // Enter in a field, or a double click, can submit again while a request is in flight.
+    if (submitting.current) return;
+    submitting.current = true;
     setFormError(null);
     try {
-      const appointment = await create.mutateAsync({ ...values, notes: values.notes || undefined });
+      const input = { ...values, notes: values.notes || undefined };
+      const appointment = await create.mutateAsync({ ...input, idempotencyKey: attemptKey(input) });
       toast.success(formatDateTime(appointment.startsAt, timezone), { title: `${appointment.service.name} booked` });
       onOpenChange(false);
       onBooked(appointment);
@@ -142,8 +182,12 @@ function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 
           setFormError(failure.message);
           break;
       }
+    } finally {
+      submitting.current = false;
     }
   };
+
+  const busy = create.isPending || isSubmitting;
 
   const notesLength = (notes ?? '').length;
   const notesError =
@@ -153,16 +197,16 @@ function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 
     <Dialog
       open
       onOpenChange={onOpenChange}
-      dismissible={!create.isPending}
+      dismissible={!busy}
       size="lg"
       title="New appointment"
       description="Choose a service, a day and a time. Your booking is confirmed straight away."
       footer={
         <>
-          <Button variant="secondary" disabled={create.isPending} onClick={() => onOpenChange(false)}>
+          <Button variant="secondary" disabled={busy} onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="submit" form={formId} loading={create.isPending}>
+          <Button type="submit" form={formId} loading={busy}>
             Book appointment
           </Button>
         </>
@@ -172,6 +216,10 @@ function BookingDialogBody({ onOpenChange, onBooked }: Omit<BookingDialogProps, 
         {formError ? (
           <Alert tone="error" title="We couldn't book that appointment" onDismiss={() => setFormError(null)}>
             {formError}
+          </Alert>
+        ) : restored ? (
+          <Alert tone="info" title="We kept your details">
+            Your session ended before this was booked. Check the details below, then book.
           </Alert>
         ) : null}
 

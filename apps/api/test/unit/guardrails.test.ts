@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { EMPTY_SLOTS, type BookingSlots, type ServiceDto } from '@appt/shared';
-import { humanDate, todayInZone } from '../../src/lib/time.js';
+import { humanDate } from '../../src/lib/time.js';
 import { applyGuardrails, isGroundedService, mentionsOtherDate, mentionsOtherTime } from '../../src/modules/ai/guardrails.js';
 import type { ProviderInput, ProviderOutput } from '../../src/modules/ai/provider.js';
-import { addDays, nextWeekday } from '../helpers/fixtures.js';
+import { referenceToday } from '../helpers/clock.js';
+import { CONSENT_TABLE } from '../helpers/consent.js';
+import { addDays } from '../helpers/fixtures.js';
 
 /**
  * The checks applied to a model answer that passed schema validation. Driven
@@ -13,8 +15,13 @@ import { addDays, nextWeekday } from '../helpers/fixtures.js';
  */
 
 const TIMEZONE = 'America/New_York';
-const today = todayInZone(TIMEZONE);
-const wednesday = nextWeekday(today, 3);
+// Pinned by TEST_TODAY (see helpers/clock.ts), so every weekday is exercised.
+const today = referenceToday(TIMEZONE);
+const weekdayName = (date: string) =>
+  new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
+// Not today's weekday: that one is asked about (today or a week today?).
+const namedDay = addDays(today, 2);
+const dayName = weekdayName(namedDay).toLowerCase();
 
 const services: ServiceDto[] = [
   { id: '00000000-0000-0000-0000-000000000001', name: 'Routine Checkup', description: null, durationMinutes: 30, priceCents: 0 },
@@ -24,12 +31,19 @@ const services: ServiceDto[] = [
 type Turn = ProviderInput['history'][number];
 
 /** `earlier` is the conversation before `userText`, oldest first, as the model is shown it. */
-function check(userText: string, model: Partial<ProviderOutput>, draft: Partial<BookingSlots> = {}, earlier: Turn[] = []) {
+function check(
+  userText: string,
+  model: Partial<ProviderOutput>,
+  draft: Partial<BookingSlots> = {},
+  earlier: Turn[] = [],
+  overrides: Partial<ProviderInput> = {},
+) {
   const input: ProviderInput = {
     businessName: 'Bluewave Dental',
     timezone: TIMEZONE,
     opensAt: '09:00',
     closesAt: '17:00',
+    openDays: [1, 2, 3, 4, 5, 6, 7],
     today,
     nowTime: '10:00',
     services,
@@ -37,6 +51,7 @@ function check(userText: string, model: Partial<ProviderOutput>, draft: Partial<
     customerName: 'Marcus',
     history: [...earlier, { role: 'user', content: userText }],
     requestId: 'req-test-0001',
+    ...overrides,
   };
   const output: ProviderOutput = {
     reply: 'Which time suits you?',
@@ -51,21 +66,27 @@ function check(userText: string, model: Partial<ProviderOutput>, draft: Partial<
 
 describe('date cross-check', () => {
   it('replaces a date the model resolved wrongly with the deterministic reading of the same message', () => {
-    const wrong = addDays(wednesday, 1);
-    const { output, events } = check('whitening on wednesday', { slots: { serviceName: 'Teeth Whitening', date: wrong } });
-    assert.equal(output.slots.date, wednesday);
+    const wrong = addDays(namedDay, 1);
+    const { output, events } = check(`whitening on ${dayName}`, { slots: { serviceName: 'Teeth Whitening', date: wrong } });
+    assert.equal(output.slots.date, namedDay);
     assert.equal(output.slots.serviceName, 'Teeth Whitening', 'the other slots are left alone');
-    assert.deepEqual(events[0], { kind: 'date_corrected', model: wrong, deterministic: wednesday });
+    assert.deepEqual(events[0], { kind: 'date_corrected', model: wrong, deterministic: namedDay });
   });
 
   it('leaves the model’s date alone when the two agree', () => {
-    const { output, events } = check('whitening on wednesday', { slots: { date: wednesday } });
-    assert.equal(output.slots.date, wednesday);
+    const { output, events } = check(`whitening on ${dayName}`, { slots: { date: namedDay } });
+    assert.equal(output.slots.date, namedDay);
     assert.deepEqual(events, []);
   });
 
-  it('does not add a date the model chose not to extract', () => {
-    const { output, events } = check('whitening on wednesday', { slots: { serviceName: 'Teeth Whitening' } });
+  it('fills in a date the model left out (the live "haircut on Monday" failure)', () => {
+    const { output, events } = check(`whitening on ${dayName}`, { slots: { serviceName: 'Teeth Whitening' } });
+    assert.equal(output.slots.date, namedDay);
+    assert.deepEqual(events[0], { kind: 'date_corrected', model: null, deterministic: namedDay });
+  });
+
+  it('does not fill in a date from a message that rules it out', () => {
+    const { output, events } = check(`not ${dayName}`, { slots: {} });
     assert.equal(output.slots.date, undefined);
     assert.deepEqual(events, []);
   });
@@ -87,10 +108,14 @@ describe('time cross-check', () => {
     assert.deepEqual(events, [{ kind: 'time_corrected', model: '14:00', deterministic: '15:00' }]);
   });
 
-  it('fills in a time the model left out', () => {
+  it('fills in a time the model left out, and replaces the reply written without it', () => {
     const { output, events } = check('whitening at 3pm', { slots: { serviceName: 'Teeth Whitening' } });
     assert.equal(output.slots.time, '15:00');
-    assert.deepEqual(events, [{ kind: 'time_corrected', model: null, deterministic: '15:00' }]);
+    assert.deepEqual(events, [
+      { kind: 'time_corrected', model: null, deterministic: '15:00' },
+      { kind: 'reply_replaced', reason: 'filled_in', reply: 'Which time suits you?' },
+    ]);
+    assert.match(output.reply, /3:00 PM\. Which day/);
   });
 
   it('reads 24-hour and noon as settled', () => {
@@ -108,11 +133,10 @@ describe('time cross-check', () => {
     assert.deepEqual(events, []);
   });
 
-  it('defers to the model when AM or PM was only a guess from opening hours', () => {
-    // "around 8" is 8 AM by opening hours, but the conversation may have said "evening".
-    const { output, events } = check('around 8', { slots: { time: '20:00' } });
-    assert.equal(output.slots.time, '20:00');
-    assert.deepEqual(events, []);
+  it('places a bare hour when only one reading is inside opening hours, over the model', () => {
+    const { output, events } = check('at 3', { slots: { time: '03:00' } });
+    assert.equal(output.slots.time, '15:00');
+    assert.deepEqual(events, [{ kind: 'time_corrected', model: '03:00', deterministic: '15:00' }]);
   });
 
   it('does not treat a part of the day with no clock time as a stated time', () => {
@@ -132,6 +156,104 @@ describe('time cross-check', () => {
   });
 });
 
+describe('ambiguity: the model’s pick is dropped and the user is asked', () => {
+  it('asks AM or PM for "At 5." instead of keeping the model’s 17:00 (the live failure)', () => {
+    const draft = { serviceName: 'Routine Checkup', date: namedDay };
+    const { output, events } = check('At 5.', { reply: 'Great, 5 PM it is!', slots: { time: '17:00' } }, draft);
+    assert.equal(output.slots.time, undefined);
+    assert.deepEqual(output.clarify, ['time']);
+    assert.deepEqual(events, [{ kind: 'clarification_asked', fields: ['time'], model: { time: '17:00' } }]);
+    assert.match(output.reply, /Did you mean 5:00 AM or 5:00 PM\? We're open 9:00 AM to 5:00 PM, so neither can start/);
+  });
+
+  it('asks about the old time too: "At 5." reopens a time already in the draft', () => {
+    const draft = { serviceName: 'Routine Checkup', date: namedDay, time: '10:00' };
+    const { output } = check('make it at 5', { slots: {}, intent: 'confirming' }, draft);
+    assert.deepEqual(output.clarify, ['time']);
+    assert.equal(output.intent, 'collecting', 'nothing can be agreed while a detail is in question');
+  });
+
+  it('asks whether today’s weekday means today or a week today while both can be booked', () => {
+    const name = weekdayName(today);
+    const { output, events } = check(`on ${name} please`, { slots: { date: today } }, { serviceName: 'Routine Checkup' });
+    assert.deepEqual(output.clarify, ['date']);
+    assert.deepEqual(events, [{ kind: 'clarification_asked', fields: ['date'], model: { date: today } }]);
+    assert.match(output.reply, new RegExp(`Did you mean ${humanDate(today)} or ${humanDate(addDays(today, 7))}\\?`));
+  });
+
+  it('takes a week today, without asking, once today cannot be booked', () => {
+    const name = weekdayName(today);
+    const weekToday = addDays(today, 7);
+    const afterClosing = check(`on ${name} please`, { slots: { date: today } }, {}, [], { nowTime: '17:30' });
+    assert.equal(afterClosing.output.clarify, undefined);
+    assert.equal(afterClosing.output.slots.date, weekToday, 'the model’s "today" is corrected');
+    assert.equal(afterClosing.events[0]?.kind, 'date_corrected');
+
+    const closedDay = [1, 2, 3, 4, 5, 6, 7].filter((d) => d !== ((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7) + 1);
+    const closed = check(`on ${name} please`, { slots: {} }, {}, [], { openDays: closedDay });
+    assert.equal(closed.output.clarify, undefined, 'neither reading is bookable, so there is nothing to choose');
+    assert.equal(closed.output.slots.date, weekToday);
+  });
+
+  it('asks which date "03/04" means instead of keeping the model’s reading', () => {
+    const { output, events } = check('Book for 03/04.', { slots: { date: '2027-03-04' } }, { serviceName: 'Routine Checkup' });
+    assert.equal(output.slots.date, undefined);
+    assert.deepEqual(output.clarify, ['date']);
+    assert.equal(events[0]?.kind, 'clarification_asked');
+    assert.match(output.reply, /Did you mean \w+, March 4, \d{4} or \w+, April 3, \d{4}\?/);
+  });
+});
+
+describe('consent', () => {
+  const shown = { serviceName: 'Routine Checkup', date: namedDay, time: '10:00' };
+
+  for (const text of ["Don't book anything yet.", 'hold on', 'is that the earliest?', 'no, another day']) {
+    it(`does not let the model read "${text}" as consent`, () => {
+      const { output, events } = check(text, { intent: 'confirming' }, shown);
+      assert.equal(output.intent, 'collecting');
+      assert.deepEqual(events, [{ kind: 'consent_unsupported' }]);
+    });
+  }
+
+  for (const [text, agrees] of CONSENT_TABLE) {
+    it(`${agrees ? 'keeps' : 'drops'} the model’s "confirming" for "${text}"`, () => {
+      const { output } = check(text, { intent: 'confirming', reply: 'Booking it now.' }, shown);
+      assert.equal(output.intent === 'confirming', agrees);
+    });
+  }
+
+  it('answers a price question the model took for consent from the catalogue', () => {
+    const { output, events } = check('Can you confirm the price first?', { intent: 'confirming', reply: 'Booking it now.' }, shown);
+    assert.equal(output.intent, 'other');
+    assert.equal(output.reply, 'Routine Checkup takes 30 minutes and has no charge.');
+    assert.deepEqual(events, [{ kind: 'consent_unsupported' }]);
+  });
+
+  it('keeps the model’s confirming intent for plain agreement', () => {
+    const { output, events } = check('yes please', { intent: 'confirming' }, shown);
+    assert.equal(output.intent, 'confirming');
+    assert.deepEqual(events, []);
+  });
+});
+
+describe('service fill-in', () => {
+  it('fills in a catalogue service the message names in full when the model drops it (the live "Routine checkup" failure)', () => {
+    const { output, events } = check('Routine checkup', { reply: 'Which day? We are open Monday to Friday.', slots: {} });
+    assert.equal(output.slots.serviceName, 'Routine Checkup');
+    assert.deepEqual(events.map((e) => e.kind), ['service_filled', 'reply_replaced']);
+  });
+
+  it('changes only the service when the user keeps the date and names another', () => {
+    const draft = { serviceName: 'Teeth Whitening', date: namedDay, time: '11:00' };
+    const { output } = check('Keep the date, but change the service to a routine checkup.', { slots: {} }, draft);
+    assert.deepEqual(output.slots, { serviceName: 'Routine Checkup' });
+  });
+
+  it('does not fill in a service the message rules out', () => {
+    assert.equal(check("I don't want teeth whitening", { slots: {} }).output.slots.serviceName, undefined);
+  });
+});
+
 describe('service grounding', () => {
   it('drops a service the user never named and asks for one instead (the live "whenever" failure)', () => {
     const { output, events } = check(
@@ -145,7 +267,7 @@ describe('service grounding', () => {
     );
     assert.equal(output.slots.serviceName, undefined);
     assert.deepEqual(events, [{ kind: 'service_ungrounded', model: 'Routine Checkup', kept: null }]);
-    assert.match(output.reply, /^Which service would you like\? We offer: Routine Checkup, Teeth Whitening\.$/);
+    assert.match(output.reply, /^Which service would you like, and what day and time suit you\? We offer: Routine Checkup, Teeth Whitening\./);
   });
 
   it('keeps the service already in the draft rather than the invented one', () => {
@@ -166,7 +288,7 @@ describe('service grounding', () => {
       { role: 'user', content: 'whitening please' },
       { role: 'assistant', content: 'Which day?' },
     ];
-    assert.deepEqual(check('friday', { slots: { serviceName: 'Teeth Whitening' } }, {}, earlier).events, []);
+    assert.deepEqual(check('that one', { slots: { serviceName: 'Teeth Whitening' } }, {}, earlier).events, []);
   });
 
   it('does not count a service only the assistant mentioned', () => {
@@ -174,11 +296,11 @@ describe('service grounding', () => {
       { role: 'user', content: 'what do you offer?' },
       { role: 'assistant', content: 'We offer Routine Checkup and Teeth Whitening.' },
     ];
-    assert.equal(check('ok, friday', { slots: { serviceName: 'Routine Checkup' } }, {}, earlier).events[0]?.kind, 'service_ungrounded');
+    assert.equal(check('ok, that one', { slots: { serviceName: 'Routine Checkup' } }, {}, earlier).events[0]?.kind, 'service_ungrounded');
   });
 
   it('accepts the service already in the draft, even abbreviated', () => {
-    assert.deepEqual(check('friday', { slots: { serviceName: 'whitening' } }, { serviceName: 'Teeth Whitening' }).events, []);
+    assert.deepEqual(check('sounds good', { slots: { serviceName: 'whitening' } }, { serviceName: 'Teeth Whitening' }).events, []);
   });
 
   it('accepts a service outside the catalogue that the user asked for, so the conversation can say it is not offered', () => {
@@ -229,17 +351,17 @@ describe('reply check', () => {
   }
 
   it('replaces a reply that names a different day from the draft, built from the draft instead', () => {
-    const reply = `See you on ${humanDate(addDays(wednesday, 1))} — what time?`;
-    const { output, events } = check('next week some time', { reply }, { serviceName: 'Routine Checkup', date: wednesday });
+    const reply = `See you on ${humanDate(addDays(namedDay, 1))} — what time?`;
+    const { output, events } = check('next week some time', { reply }, { serviceName: 'Routine Checkup', date: namedDay });
     assert.equal(events[0]?.kind, 'reply_replaced');
-    assert.ok(output.reply.includes(humanDate(wednesday)), output.reply);
+    assert.ok(output.reply.includes(humanDate(namedDay)), output.reply);
     assert.match(output.reply, /What time works for you\?/);
   });
 
   it('checks the reply against the corrected date, not the model’s', () => {
-    const wrong = addDays(wednesday, 1);
+    const wrong = addDays(namedDay, 1);
     const reply = `${humanDate(wrong)} works — what time?`;
-    const { events } = check('whitening on wednesday', { reply, slots: { serviceName: 'Teeth Whitening', date: wrong } });
+    const { events } = check(`whitening on ${dayName}`, { reply, slots: { serviceName: 'Teeth Whitening', date: wrong } });
     assert.deepEqual(
       events.map((e) => e.kind),
       ['date_corrected', 'reply_replaced'],
@@ -248,6 +370,13 @@ describe('reply check', () => {
 
   it('does not judge weekdays when the draft has no date to contradict', () => {
     assert.deepEqual(check('hello', { reply: 'We are open Monday to Friday.' }).events, []);
+  });
+
+  it('replaces a reply that names a calendar date the draft does not hold (the live "Friday, October 9" failure)', () => {
+    const reply = 'Which service would you like for your appointment on Friday, October 9, 2026?';
+    const { output, events } = check('hello', { reply });
+    assert.deepEqual(events, [{ kind: 'reply_replaced', reason: 'date_mismatch', reply }]);
+    assert.ok(!output.reply.includes('October 9'));
   });
 });
 

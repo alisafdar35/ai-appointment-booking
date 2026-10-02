@@ -71,7 +71,12 @@ export class ApiClient {
     return availability.slots.filter((slot) => slot.available).map((slot) => slot.time);
   }
 
-  async book(input: { serviceId: string; date: string; time: string }): Promise<AppointmentDto> {
+  /** Every appointment this user can see (a customer: their own). */
+  async appointments(): Promise<AppointmentDto[]> {
+    return (await this.get<{ appointments: AppointmentDto[] }>('/api/appointments')).appointments;
+  }
+
+  async book(input: { serviceId: string; date: string; time: string; notes?: string }): Promise<AppointmentDto> {
     const response = await this.request.post('/api/appointments', {
       headers: this.headers,
       data: { ...input, source: 'form' },
@@ -89,6 +94,16 @@ export class ApiClient {
  */
 export async function signUpCustomer(page: Page, account: Account = newAccount()): Promise<ApiClient> {
   const client = await ApiClient.connect(page.request, account, { signUp: true });
+  await page.context().addInitScript(() => window.localStorage.setItem('slotly.session', '1'));
+  return client;
+}
+
+/**
+ * Sign an existing customer in through the page's own request context (the
+ * browser then holds their cookies), with the same "signed in before" hint.
+ */
+export async function signInCustomer(page: Page, account: Account): Promise<ApiClient> {
+  const client = await ApiClient.connect(page.request, account, { signUp: false });
   await page.context().addInitScript(() => window.localStorage.setItem('slotly.session', '1'));
   return client;
 }
@@ -180,6 +195,16 @@ export function longDate(iso: string): string {
     month: 'long',
     day: 'numeric',
     year: 'numeric',
+    timeZone: 'UTC',
+  });
+}
+
+/** "2026-10-07" -> "Wed, Oct 7", as the appointment cards print it. */
+export function shortDate(iso: string): string {
+  return new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
     timeZone: 'UTC',
   });
 }

@@ -12,6 +12,7 @@ vi.mock('@/providers/AuthProvider', () => ({ useBusinessTimezone: () => 'America
 const availability = (slots: AvailabilityDto['slots']): AvailabilityDto => ({
   date: '2026-10-05',
   serviceId: 'svc',
+  closed: false,
   durationMinutes: 30,
   slots,
 });
@@ -59,6 +60,13 @@ describe('SlotPicker', () => {
     expect(screen.getByRole('radio', { name: /9:30 AM/ })).toBeDisabled();
     expect(group).toBeInTheDocument();
     expect(screen.getByText(/30-minute appointment · times shown in EDT/)).toBeInTheDocument();
+  });
+
+  it('says the business is closed that day, rather than merely full, when the API says so', async () => {
+    vi.spyOn(servicesApi, 'availability').mockResolvedValue({ ...availability([]), closed: true });
+    renderWithClient(<Harness />);
+    expect(await screen.findByText('Closed on this day')).toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
   });
 
   it('selects on click and reports the 24-hour value', async () => {

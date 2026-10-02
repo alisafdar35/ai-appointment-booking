@@ -90,15 +90,19 @@ export function SlotPicker({
     );
   }
 
-  const { slots, durationMinutes } = availability.data;
+  const { slots, durationMinutes, closed } = availability.data;
 
   if (slots.length === 0) {
     return (
       <EmptyState
         className={className}
         icon={CalendarX2}
-        title="No availability on this date"
-        description="The business is closed or has no room for this service. Try another day."
+        title={closed ? 'Closed on this day' : 'No availability on this date'}
+        description={
+          closed
+            ? 'The business does not open on this day of the week. Try another day.'
+            : 'The business is closed or has no room for this service. Try another day.'
+        }
       />
     );
   }

@@ -58,7 +58,8 @@ describe('rate limiting', () => {
 
       const blocked = await wrongLogin();
       const error = assertApiError(blocked, 429, 'RATE_LIMITED');
-      assert.match(error.message, /^Too many requests\. Try again in \d+ seconds?\.$/);
+      // A fifteen-minute lockout is stated in minutes, so the user can act on it.
+      assert.match(error.message, /^Too many requests\. Try again in 1[45] minutes\.$/);
 
       const retryAfter = Number(blocked.headers.get('retry-after'));
       assert.ok(Number.isInteger(retryAfter) && retryAfter > 0 && retryAfter <= 15 * 60, `Retry-After: ${retryAfter}`);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { SEED } from '../helpers/fixtures.js';
-import { buildSystemPrompt } from '../../src/modules/ai/prompts.js';
+import { buildSystemPrompt, openDaysPhrase } from '../../src/modules/ai/prompts.js';
 import { ASSISTANT_TOOL_NAME, buildAssistantTool, parseAssistantArgs } from '../../src/modules/ai/tools.js';
 
 /**
@@ -111,6 +111,7 @@ describe('buildSystemPrompt', () => {
     timezone: SEED.bluewave.timezone,
     opensAt: '09:00',
     closesAt: '17:00',
+    openDays: [1, 2, 3, 4, 5, 6, 7],
     today: '2031-04-22',
     nowTime: '14:05',
     services: [
@@ -140,6 +141,12 @@ describe('buildSystemPrompt', () => {
     assert.doesNotMatch(prompt, /Date:/);
   });
 
+  it('names the open days only as they are: every day, or the listed weekdays', () => {
+    assert.match(prompt, /open every day, 9:00 AM to 5:00 PM/);
+    assert.equal(openDaysPhrase([5, 1, 2, 3, 4]), 'on Monday, Tuesday, Wednesday, Thursday, Friday');
+    assert.match(prompt, /Never propose a day it is closed/);
+  });
+
   it('forbids the model from claiming a booking exists', () => {
     assert.match(prompt, /Do not claim an appointment is booked/);
   });
@@ -150,6 +157,7 @@ describe('buildSystemPrompt', () => {
       timezone: 'UTC',
       opensAt: '09:00',
       closesAt: '17:00',
+      openDays: [1, 2, 3, 4, 5, 6, 7],
       today: '2031-04-22',
       nowTime: '09:00',
       services: [],

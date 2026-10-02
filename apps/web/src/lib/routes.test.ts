@@ -31,6 +31,11 @@ describe('loginHref', () => {
     expect(loginHref('/appointments?tab=past')).toBe('/login?next=%2Fappointments%3Ftab%3Dpast');
   });
 
+  it('marks a sign-in caused by an ended session, so the page can explain it', () => {
+    expect(loginHref('/appointments', { expired: true })).toBe('/login?next=%2Fappointments&expired=1');
+    expect(loginHref(undefined, { expired: true })).toBe('/login?expired=1');
+  });
+
   it('omits next when there is nothing safe to return to', () => {
     expect(loginHref()).toBe('/login');
     expect(loginHref('https://evil.example')).toBe('/login');

@@ -25,6 +25,8 @@ export interface RequestOptions {
   /** Cancels the request; React Query passes its own so unmounted views stop fetching. */
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Extra request headers (e.g. `Idempotency-Key`). They are sent again if the request is replayed after a refresh. */
+  headers?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -85,15 +87,24 @@ export function isSessionEnded(error: unknown): boolean {
  * sign-out).
  */
 const SUPERSEDED_MAX_ATTEMPTS = 4;
+
+/**
+ * A refresh gets longer than other requests. Giving up early is worse than
+ * waiting: the server may still complete the rotation after the browser has
+ * stopped listening, and the cookie this tab then holds is the old one, which
+ * the next refresh presents as a replay. On a free-tier host waking from sleep
+ * (30-60 s) the default timeout would do exactly that.
+ */
+export const REFRESH_TIMEOUT_MS = 75_000;
 const SUPERSEDED_BASE_DELAY_MS = 150;
 
 const supersededRetryDelay = (attempt: number) =>
   SUPERSEDED_BASE_DELAY_MS * 2 ** attempt + Math.random() * SUPERSEDED_BASE_DELAY_MS;
 
-async function refreshWithRetry(): Promise<AuthResponse> {
+async function refreshWithRetry(timeoutMs: number): Promise<AuthResponse> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await execute<AuthResponse>('/auth/refresh', { method: 'POST' });
+      return await execute<AuthResponse>('/auth/refresh', { method: 'POST', timeoutMs });
     } catch (error) {
       const superseded = error instanceof ApiError && error.code === ERROR_CODES.SESSION_SUPERSEDED;
       if (!superseded || attempt + 1 >= SUPERSEDED_MAX_ATTEMPTS) throw error;
@@ -111,11 +122,11 @@ async function refreshWithRetry(): Promise<AuthResponse> {
  */
 const REFRESH_LOCK = 'slotly:auth-refresh';
 
-async function requestRefresh(): Promise<AuthResponse> {
+async function requestRefresh(timeoutMs: number): Promise<AuthResponse> {
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-  if (!locks) return refreshWithRetry();
+  if (!locks) return refreshWithRetry(timeoutMs);
   // The lock's promise resolves to the callback's return value (lib.dom types it as nested).
-  return locks.request(REFRESH_LOCK, () => refreshWithRetry());
+  return locks.request(REFRESH_LOCK, () => refreshWithRetry(timeoutMs));
 }
 
 let refreshInFlight: Promise<AuthResponse> | null = null;
@@ -138,8 +149,8 @@ let refreshInFlight: Promise<AuthResponse> | null = null;
  * A 401 that ends the session clears local session state. Network and server
  * errors are transient and leave it alone.
  */
-export function refreshSession(): Promise<AuthResponse> {
-  refreshInFlight ??= requestRefresh()
+export function refreshSession({ timeoutMs = REFRESH_TIMEOUT_MS }: { timeoutMs?: number } = {}): Promise<AuthResponse> {
+  refreshInFlight ??= requestRefresh(timeoutMs)
     .then(adoptSession)
     .catch((error: unknown) => {
       if (isSessionEnded(error)) clearSession();
@@ -189,7 +200,7 @@ function networkError(timedOut: boolean): ApiError {
 
 /** fetch() with a timeout and network failures mapped to ApiError(NETWORK). */
 async function send(path: string, options: RequestOptions): Promise<Response> {
-  const { method = 'GET', body, query, signal, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+  const { method = 'GET', body, query, signal, timeoutMs = DEFAULT_TIMEOUT_MS, headers } = options;
 
   // One controller merges the caller's cancellation with our timeout.
   const controller = new AbortController();
@@ -209,6 +220,7 @@ async function send(path: string, options: RequestOptions): Promise<Response> {
       headers: {
         Accept: 'application/json',
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...headers,
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,

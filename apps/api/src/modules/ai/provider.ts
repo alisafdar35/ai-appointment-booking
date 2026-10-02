@@ -19,6 +19,12 @@ export interface ProviderOutput {
   model?: string | undefined;
   usage?: { promptTokens?: number; completionTokens?: number } | undefined;
   latencyMs: number;
+  /**
+   * Draft fields this message reopened without settling ("at 5": AM or PM?).
+   * The caller clears them, so a confirmation on screen for the old value can
+   * no longer be agreed to while the reply asks which one was meant.
+   */
+  clarify?: ('date' | 'time')[] | undefined;
 }
 
 /**

@@ -9,6 +9,8 @@ import { AuthProvider } from '@/providers/AuthProvider';
 import { DEMO_ACCOUNT } from './demo-account';
 import { LoginForm } from './LoginForm';
 
+vi.mock('next/navigation', () => ({ useSearchParams: () => new URLSearchParams(window.location.search) }));
+
 const mocks = vi.hoisted(() => ({ login: vi.fn() }));
 
 // Only the network boundary is replaced; ApiError, hasErrorCode and the rest of
@@ -52,6 +54,18 @@ beforeEach(() => {
 });
 
 describe('LoginForm', () => {
+  it('explains that the session ended when sent here because of it, and not otherwise', () => {
+    window.history.replaceState(null, '', '/login?next=%2Fappointments&expired=1');
+    const { unmount } = renderForm();
+    expect(screen.getByText('Your session has ended')).toBeInTheDocument();
+    unmount();
+
+    window.history.replaceState(null, '', '/login?next=%2Fappointments');
+    renderForm();
+    expect(screen.queryByText('Your session has ended')).not.toBeInTheDocument();
+    window.history.replaceState(null, '', '/');
+  });
+
   it('renders labelled, autocomplete-ready fields', () => {
     renderForm();
 

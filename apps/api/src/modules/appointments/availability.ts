@@ -1,5 +1,5 @@
 import { SLOT_GRID_MINUTES, type AvailabilityDto } from '@appt/shared';
-import { pool } from '../../db/pool.js';
+import { pool, type Queryable } from '../../db/pool.js';
 
 /**
  * Availability.
@@ -30,61 +30,71 @@ export async function getAvailability(
   customerId: string | null = null,
 ): Promise<AvailabilityDto | null> {
   const { rows } = await pool.query<{
-    time: string;
-    available: boolean;
     duration_minutes: number;
+    is_open: boolean;
+    slots: { time: string; available: boolean }[];
   }>(
-    `WITH biz AS (
-       SELECT timezone, opens_at, closes_at FROM businesses WHERE id = $1
-     ),
-     svc AS (
-       SELECT duration_minutes FROM services
-       WHERE business_id = $1 AND id = $2 AND is_active
+    `WITH day AS (
+       SELECT b.timezone, b.opens_at, b.closes_at, s.duration_minutes,
+              EXTRACT(ISODOW FROM $3::date)::smallint = ANY (b.open_days) AS is_open
+       FROM businesses b
+       JOIN services s ON s.business_id = b.id AND s.id = $2 AND s.is_active
+       WHERE b.id = $1
      ),
      -- Candidate start times on the grid, stopping early enough that the
-     -- service still finishes before closing.
+     -- service still finishes before closing. None on a day the business is
+     -- closed, and none for a wall time a spring-forward transition skips:
+     -- such a time has no instant, and round-tripping it through the zone
+     -- exposes that (see checkSlot).
      candidates AS (
-       SELECT gs AS local_start, svc.duration_minutes
-       FROM biz, svc,
+       SELECT gs AS local_start, gs AT TIME ZONE day.timezone AS abs_start
+       FROM day,
             generate_series(
-              ($3::date + biz.opens_at)::timestamp,
-              ($3::date + biz.closes_at)::timestamp - make_interval(mins => svc.duration_minutes),
+              ($3::date + day.opens_at)::timestamp,
+              ($3::date + day.closes_at)::timestamp - make_interval(mins => day.duration_minutes),
               make_interval(mins => $4::int)
             ) AS gs
+       WHERE day.is_open
+         AND (gs AT TIME ZONE day.timezone) AT TIME ZONE day.timezone = gs
      )
      SELECT
-       to_char(c.local_start, 'HH24:MI') AS time,
-       c.duration_minutes,
-       (
-         -- Not already in the past...
-         (c.local_start AT TIME ZONE biz.timezone) > now()
-         -- ...and not overlapping a live appointment for this service, or
-         -- one the customer already holds for any service.
-         AND NOT EXISTS (
-           SELECT 1 FROM appointments a
-           WHERE a.business_id = $1
-             AND (a.service_id = $2 OR a.user_id = $5)
-             AND a.status IN ('pending', 'confirmed')
-             AND a.slot && tstzrange(
-                   c.local_start AT TIME ZONE biz.timezone,
-                   (c.local_start AT TIME ZONE biz.timezone)
-                     + make_interval(mins => c.duration_minutes),
-                   '[)')
-         )
-       ) AS available
-     FROM candidates c, biz
-     ORDER BY c.local_start`,
+       day.duration_minutes,
+       day.is_open,
+       COALESCE((
+         SELECT json_agg(json_build_object(
+                  'time', to_char(c.local_start, 'HH24:MI'),
+                  'available',
+                  -- Not already in the past...
+                  c.abs_start > now()
+                  -- ...and not overlapping a live appointment for this service,
+                  -- or one the customer already holds for any service.
+                  AND NOT EXISTS (
+                    SELECT 1 FROM appointments a
+                    WHERE a.business_id = $1
+                      AND (a.service_id = $2 OR a.user_id = $5)
+                      AND a.status IN ('pending', 'confirmed')
+                      AND a.slot && tstzrange(
+                            c.abs_start,
+                            c.abs_start + make_interval(mins => day.duration_minutes),
+                            '[)')
+                  )
+                ) ORDER BY c.local_start)
+         FROM candidates c
+       ), '[]'::json) AS slots
+     FROM day`,
     [businessId, serviceId, date, SLOT_GRID_MINUTES, customerId],
   );
 
-  // Empty means the service does not exist in this tenant, or is inactive.
-  if (rows.length === 0) return null;
+  // No row means the service does not exist in this tenant, or is inactive.
+  const row = rows[0];
+  if (!row) return null;
 
   return {
     date,
     serviceId,
-    durationMinutes: rows[0]!.duration_minutes,
-    slots: rows.map((r) => ({ time: r.time, available: r.available })),
+    durationMinutes: row.duration_minutes,
+    closed: !row.is_open,
+    slots: row.slots,
   };
 }
 
@@ -99,6 +109,8 @@ export type SlotCheck =
   | { ok: true; durationMinutes: number }
   | { ok: false; reason: 'service_not_found' }
   | { ok: false; reason: 'in_past' }
+  | { ok: false; reason: 'closed_day'; openDays: number[] }
+  | { ok: false; reason: 'nonexistent_time' }
   | { ok: false; reason: 'outside_hours'; opensAt: string; closesAt: string }
   | { ok: false; reason: 'off_grid' }
   | { ok: false; reason: 'taken' }
@@ -112,10 +124,14 @@ export async function checkSlot(
   date: string,
   time: string,
   customerId: string,
+  client: Queryable = pool,
 ): Promise<SlotCheck> {
-  const { rows } = await pool.query<{
+  const { rows } = await client.query<{
     duration_minutes: number;
     in_past: boolean;
+    is_open: boolean;
+    open_days: number[];
+    exists_locally: boolean;
     within_hours: boolean;
     taken: boolean;
     customer_busy: boolean;
@@ -123,7 +139,7 @@ export async function checkSlot(
     closes_at: string;
   }>(
     `WITH biz AS (
-       SELECT timezone, opens_at, closes_at FROM businesses WHERE id = $1
+       SELECT timezone, opens_at, closes_at, open_days FROM businesses WHERE id = $1
      ),
      svc AS (
        SELECT duration_minutes FROM services
@@ -132,7 +148,7 @@ export async function checkSlot(
      req AS (
        SELECT
          svc.duration_minutes,
-         biz.opens_at, biz.closes_at,
+         biz.timezone, biz.opens_at, biz.closes_at, biz.open_days,
          ($3 || ' ' || $4)::timestamp AS local_start,
          (($3 || ' ' || $4)::timestamp) AT TIME ZONE biz.timezone AS abs_start,
          ((($3 || ' ' || $4)::timestamp) AT TIME ZONE biz.timezone)
@@ -144,6 +160,15 @@ export async function checkSlot(
        to_char(r.opens_at,  'HH24:MI') AS opens_at,
        to_char(r.closes_at, 'HH24:MI') AS closes_at,
        (r.abs_start <= now()) AS in_past,
+       EXTRACT(ISODOW FROM r.local_start)::smallint = ANY (r.open_days) AS is_open,
+       r.open_days::int[] AS open_days,
+       -- Postgres resolves a wall time inside a spring-forward gap (02:30 on a
+       -- US transition day) by shifting it an hour, so it would quietly book
+       -- 03:30. Converting the instant back exposes the shift: the time does
+       -- not exist that day. A repeated fall-back time (01:30) round-trips
+       -- fine, and Postgres takes its second occurrence, standard time; the
+       -- availability grid uses the same conversion, so the two agree.
+       (r.abs_start AT TIME ZONE r.timezone) = r.local_start AS exists_locally,
        -- The whole appointment must fit inside opening hours, not just its start.
        (r.local_start::time >= r.opens_at
         AND (r.local_start + make_interval(mins => r.duration_minutes))::time <= r.closes_at
@@ -169,6 +194,8 @@ export async function checkSlot(
   const row = rows[0];
   if (!row) return { ok: false, reason: 'service_not_found' };
   if (row.in_past) return { ok: false, reason: 'in_past' };
+  if (!row.is_open) return { ok: false, reason: 'closed_day', openDays: row.open_days };
+  if (!row.exists_locally) return { ok: false, reason: 'nonexistent_time' };
   if (!row.within_hours) {
     return { ok: false, reason: 'outside_hours', opensAt: row.opens_at, closesAt: row.closes_at };
   }

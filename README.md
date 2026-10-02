@@ -15,7 +15,7 @@ Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next
 | Demo video | _coming soon_ |
 | Repository | https://github.com/alisafdar35/ai-appointment-booking |
 
-> The API runs on Render's free plan, which sleeps after 15 minutes idle: the first request after a pause can take ~30–60 s while it wakes. Everything is fast after that.
+> The API runs on Render's free plan, which sleeps after 15 minutes idle: the first request after a pause can take ~25–60 s while it wakes (measured 24 s). The app shows "Waking up the server…" and keeps you signed in meanwhile. Everything is fast after that.
 
 **Demo logins** (password for all: `Password123!`)
 
@@ -28,7 +28,6 @@ Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next
 
 The sign-in page can fill in the customer account for you. You can also sign up with a new business, or join Bluewave with the business code `bluewave`.
 
-> The free Render instance sleeps when idle, so the first request after a pause can take about 50 seconds.
 
 ---
 
@@ -46,7 +45,7 @@ More screenshots: [landing](docs/screenshots/landing.png), [login](docs/screensh
 
 ## What the brief asked for, and where it is
 
-The full line-by-line audit, including what is partial, is in [docs/assessment-checklist.md](docs/assessment-checklist.md).
+The full line-by-line audit, including what is partial, is in [docs/assessment-checklist.md](docs/assessment-checklist.md). Every use case and edge case (auth, AI conversation, scheduling, reliability, submission) is mapped to the test that proves it in [docs/verification-matrix.md](docs/verification-matrix.md).
 
 | Brief | Implementation |
 |---|---|
@@ -180,7 +179,8 @@ npm run dev                   # builds @appt/shared, then API on :4000 and web o
 
 Open http://localhost:3000 and sign in as `customer@bluewave.test` / `Password123!`.
 
-- **Without Docker:** create a database, point `DATABASE_URL` at it, then run `npm install && npm run db:migrate && npm run db:seed`.
+- **Without Docker:** create a database (PostgreSQL 15+; the role needs CREATE on it, and `btree_gist`, `citext` and `pgcrypto` must be available), point `DATABASE_URL` in `.env` at it, then run `npm install && npm run db:migrate && npm run db:seed && npm run dev`. For the API tests, also set `TEST_DATABASE_URL` (see Testing). To check the schema guarantees: `psql "<your DATABASE_URL>" -f db/verify.sql`.
+- **Other ports:** set `PORT` and `CORS_ORIGINS=http://localhost:<webport>` in `.env`, set `API_ORIGIN` and `NEXT_PUBLIC_SOCKET_URL` to `http://localhost:<apiport>` in `apps/web/.env.local`, then run `npm run dev:api` and `npm run dev -w @appt/web -- -p <webport>`.
 - **Without a Mistral key:** everything works. Replies come from the deterministic engine and the UI labels them "Guided mode".
 - **Reset local data:** `npm run db:reset` (drops the Docker volume, then migrates and seeds again).
 - The web app reads its own env from `apps/web/.env.local` (see [apps/web/.env.example](apps/web/.env.example)). The defaults already point at `localhost:4000`.
@@ -228,9 +228,9 @@ Web (`apps/web`, read by Next.js **at build time**):
 
 | Suite | Command | Count (latest local run) | Needs |
 |---|---|---|---|
-| API unit + integration | `npm test -w @appt/api` | **589 tests**, 22 files, all passing (~28 s) | Postgres on :5433 (creates throwaway `appt_test*` databases) |
-| Web unit/component | `npm test -w @appt/web` | **439 tests**, 39 files, all passing (~7 s) | nothing |
-| End-to-end (Playwright) | `npm run e2e` | **50 tests**: 25 scenarios × desktop and mobile Chrome, 6 spec files, all passing (~1 min incl. build) | Postgres on :5433, ports 3100 and 4100 free |
+| API unit + integration | `npm test -w @appt/api` | **760 tests**, 26 files, all passing (~50 s) | Postgres on :5433, or `TEST_DATABASE_URL` pointing at a server where the role can CREATE DATABASE (name must end in `_test`; it creates `<name>` and `<name>_1`…`_3`) |
+| Web unit/component | `npm test -w @appt/web` | **461 tests**, 40 files, all passing (~8 s) | nothing |
+| End-to-end (Playwright) | `npm run e2e` | **98 tests** (49 scenarios × desktop and mobile Chrome, 11 spec files): 96 pass, 2 skipped by design (the keyboard-only scenario runs on desktop only); `E2E_ALL_BROWSERS=1` adds Firefox and WebKit | Postgres on :5433, ports 3100 and 4100 free |
 | Types + lint | `npm run typecheck && npm run lint` | clean | — |
 
 - The **API integration tests** run the real `createApp()` over HTTP, against a database built by the production migration runner and `db/seed.sql`. Mistral is exercised through a local stub that speaks the chat-completions protocol. Details: [apps/api/test/README.md](apps/api/test/README.md).
@@ -281,20 +281,21 @@ These are deliberate scope cuts, each checked against the code:
 - **Rate limiting is in-memory, per instance.** With more than one replica, each instance has its own budget (the fix is a Redis store). Unauthenticated limiters key by IP, which depends on `TRUST_PROXY_HOPS` matching the real proxy chain. `2` is the assumed Vercel → Render chain and must be checked on the deployed stack (see [docs/deployment.md](docs/deployment.md#rate-limiting-behind-the-proxy)). The API must also be reachable only through the proxy, or a spoofed `X-Forwarded-For` lets a client pick its own key.
 - **Access JWTs stay valid until they expire (15 min) after logout.** Logout revokes the refresh token, clears cookies and disconnects the user's sockets, but there is no denylist for access tokens on REST calls.
 - **No cursor pagination.** Appointment lists cap at 100 (`limit`), the session sidebar at 30, and transcripts load the newest 200 messages.
-- **Overlap is per service** (one chair per service): two customers can book two different services at the same time. There is no staff or room model.
+- **Capacity is one chair per service.** Two customers can book two different services at the same time (one customer can never be double-booked). There is no staff or room model.
 - **No status transitions beyond cancel.** `completed` and `no_show` are reserved for a staff endpoint that does not exist yet, so past bookings stay `confirmed`. Staff cannot book on a customer's behalf.
 - **Login without a business code** picks the oldest account if an email exists in several tenants, and the login form has no business-code field.
-- **No email verification, password reset or tenant settings UI** (hours and timezone are seed or DB values).
-- **AI:** only *dates* from the model are cross-checked by code. Model *times* are validated for format and business hours, not re-derived. There is no circuit breaker.
-- **Ops:** migrations run in Render's `startCommand` (fine for one instance). Expired refresh tokens are never swept, although the index for that job exists. Certificate-verified TLS (`DATABASE_SSL=true`) has not yet been exercised against Neon. The production CSP allows `'unsafe-inline'` scripts (a Next.js limitation without nonces).
+- **No email verification, password reset or tenant settings UI** (hours, open weekdays and timezone are seed or DB values). No holiday/one-off closures.
+- **No rescheduling.** Cancel and book again; there is no atomic move.
+- **AI:** dates, times and services from the model are cross-checked against the user's own words, and ambiguous input ("at 5", "03/04") is clarified rather than guessed, but the checks are rule-based: a model that correctly infers a service from a description ("my teeth are yellow") is asked to let the user pick. There is no circuit breaker, and the per-conversation turn queue is per process (database locks remain the backstop across instances).
+- **Ops:** migrations run in Render's `startCommand` (fine for one instance). Expired refresh tokens are never swept, although the index for that job exists. The production CSP allows `'unsafe-inline'` scripts (a Next.js limitation without nonces).
 
 ## What I'd do next
 
 1. Redis for rate limits and the Socket.IO adapter, so the API can scale horizontally.
 2. Row Level Security keyed on `business_id`, on top of the composite FKs.
-3. A resources model (staff/rooms), weekly hours and closures. The EXCLUDE constraint moves to `(resource_id, slot)`.
+3. A resources model (staff/rooms), per-day hours and one-off closures. The EXCLUDE constraint moves to `(resource_id, slot)`.
 4. Keyset pagination for appointments and transcripts (the indexes already support it).
-5. Cross-check model times the way dates are checked, and build an offline eval set from `ai_interaction_logs` + `chat_messages.tool_calls`.
+5. An offline eval set from `ai_interaction_logs` + `chat_messages.tool_calls`, scored on extraction accuracy and guardrail hit rates.
 6. A scheduled job to sweep expired refresh tokens and partition AI logs by month.
 7. Reschedule flow, email confirmations with the `.ics` already generated client-side, and a tenant settings page.
 
@@ -311,6 +312,7 @@ These are deliberate scope cuts, each checked against the code:
 | [docs/deployment.md](docs/deployment.md) | Neon + Render + Vercel, step by step |
 | [docs/demo-script.md](docs/demo-script.md) | 4–5 minute video script |
 | [docs/assessment-checklist.md](docs/assessment-checklist.md) | Every requirement → status → evidence |
+| [docs/verification-matrix.md](docs/verification-matrix.md) | Every use case and edge case → status → the test that proves it |
 
 ## License
 

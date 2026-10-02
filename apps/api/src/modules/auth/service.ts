@@ -112,6 +112,18 @@ export async function signup(
       role = 'customer';
     } else {
       // Self-serve: create the tenant and make this account its owner.
+      //
+      // One workspace per owner email. Without this, a resubmitted signup (a
+      // double click, a retry after a lost response) would create a second
+      // business with a second account the sign-in form can never reach, since
+      // login without a business code picks the oldest account. No unique
+      // index can express "unique among owners" without failing on tenants
+      // created before this rule, so an advisory lock on the email serialises
+      // concurrent attempts and makes the check below race-free.
+      await repo.lockOwnerEmail(client, input.email);
+      if (await repo.ownsWorkspace(input.email, client)) {
+        throw emailTaken('This email already owns a workspace. Sign in instead.');
+      }
       const name = input.businessName?.trim() || `${input.fullName.split(' ')[0]}'s Workspace`;
       const business = await createBusinessWithFreeSlug(client, name);
       businessId = business.id;
@@ -236,18 +248,14 @@ export const REFRESH_REUSE_GRACE_SECONDS = 15;
  * every live token for that user is revoked and both are forced to sign in
  * again. Losing a session is a small price for closing a stolen one.
  *
- * The exception is a token rotated within the last few seconds: that is a
- * sibling tab losing a race, not a thief (see REFRESH_REUSE_GRACE_SECONDS). It
- * is refused with SESSION_SUPERSEDED and nothing else is revoked.
+ * The exception is a token rotated within the last few seconds (see
+ * REFRESH_REUSE_GRACE_SECONDS and redeemRotated).
  */
-export async function refresh(
-  token: string,
-  meta: { userAgent?: string | undefined },
-): Promise<{ auth: AuthResponse; refreshToken: string; refreshExpiresAt: Date }> {
+export async function refresh(token: string, meta: { userAgent?: string | undefined }): Promise<RefreshResult> {
   const existing = await repo.findRefreshToken(token);
   if (!existing) throw unauthenticated('Your session has expired');
 
-  if (existing.revoked_at) return rejectRevoked(existing);
+  if (existing.revoked_at) return redeemRotated(existing, meta);
 
   if (new Date(existing.expires_at).getTime() <= Date.now()) {
     throw unauthenticated('Your session has expired');
@@ -278,7 +286,7 @@ export async function refresh(
       if (!claimed) throw new TokenAlreadyRotated();
     });
   } catch (err) {
-    if (err instanceof TokenAlreadyRotated) return rejectRevoked(existing);
+    if (err instanceof TokenAlreadyRotated) return redeemRotated(existing, meta);
     throw err;
   }
 
@@ -292,14 +300,63 @@ export async function refresh(
 /** Thrown inside the rotation transaction to roll back the successor token. */
 class TokenAlreadyRotated extends Error {}
 
-async function rejectRevoked(token: repo.RefreshTokenRow): Promise<never> {
-  // Re-read rather than trusting `token`: when a concurrent rotation is what
-  // revoked it, the copy read before the race still says it is live.
-  if (await repo.wasRotatedWithin(token.id, REFRESH_REUSE_GRACE_SECONDS)) {
+type RefreshResult = { auth: AuthResponse; refreshToken: string; refreshExpiresAt: Date };
+
+/**
+ * A token that was already rotated is presented again. Inside the grace window
+ * there are two innocent explanations, told apart by the successor:
+ *
+ *   - Its successor has been used (rotated or signed out). Another tab won
+ *     the race and the browser already holds the newer cookie: refuse with
+ *     SESSION_SUPERSEDED and revoke nothing.
+ *   - Its successor was never used. The response that carried it was lost
+ *     (a timeout during a cold start), so no newer cookie will ever arrive and
+ *     SESSION_SUPERSEDED would be final. Treat the rotation as abandoned:
+ *     revoke the unused successor and issue a fresh pair, as Auth0's reuse
+ *     interval does.
+ *
+ * A successor revoked that way is marked abandoned; if it turns up after all,
+ * it is superseded too. Outside the window it is a replay (rejectReplay), and
+ * so is a token ended by logout (no successor). The presented token and
+ * its successor are row-locked for the decision, so two retries of one token
+ * cannot both take over the same successor.
+ */
+async function redeemRotated(token: repo.RefreshTokenRow, meta: { userAgent?: string | undefined }): Promise<RefreshResult> {
+  // Read before the transaction, so it does not hold a second pooled connection.
+  const user = await repo.findUserById(token.user_id);
+  const outcome = await withTransaction(async (client) => {
+    const rotation = await repo.lockRotation(client, token.id, REFRESH_REUSE_GRACE_SECONDS);
+    if (!rotation.recent || !rotation.successorId) return 'replay' as const;
+    // An abandoned successor presented after all: its response did arrive, and
+    // a retry has already taken over. Recovering again would revoke that one.
+    if (rotation.abandoned || !rotation.successorUnused) return 'superseded' as const;
+    if (!user || new Date(token.expires_at).getTime() <= Date.now()) return 'expired' as const;
+
+    const nextToken = generateRefreshToken();
+    const tokens = buildTokens(user, nextToken);
+    const stored = await repo.storeRefreshToken(client, {
+      userId: user.id,
+      token: nextToken,
+      expiresAt: tokens.refreshExpiresAt,
+      userAgent: meta.userAgent,
+    });
+    await repo.replaceAbandonedSuccessor(client, token.id, rotation.successorId, stored.id);
+    return { tokens, user };
+  });
+
+  if (outcome === 'replay') return rejectReplay(token);
+  if (outcome === 'expired') throw unauthenticated('Your session has expired');
+  if (outcome === 'superseded') {
     logger.info({ userId: token.user_id, tokenId: token.id }, 'Refresh token superseded by a concurrent rotation');
     throw sessionSuperseded();
   }
-  return rejectReplay(token);
+  logger.warn({ userId: token.user_id, tokenId: token.id }, 'Abandoned refresh rotation recovered with a fresh pair');
+  const { tokens } = outcome;
+  return {
+    auth: { user: outcome.user, accessToken: tokens.accessToken, expiresInSeconds: tokens.expiresInSeconds },
+    refreshToken: tokens.refreshToken,
+    refreshExpiresAt: tokens.refreshExpiresAt,
+  };
 }
 
 async function rejectReplay(token: repo.RefreshTokenRow): Promise<never> {

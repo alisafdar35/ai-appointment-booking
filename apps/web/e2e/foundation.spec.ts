@@ -88,6 +88,8 @@ test.describe('signed-in session', () => {
     // The user chose to leave, so there is no "next" to return to.
     await expect(page).toHaveURL(/\/login$/);
     await page.goto('/assistant');
-    await expect(page).toHaveURL(/\/login\?next=%2Fassistant$/);
+    // signInViaApi's init script puts the "signed in before" hint back on every load (the app itself
+    // removed it), so the page tries the dead refresh cookie and says the session has ended.
+    await expect(page).toHaveURL(/\/login\?next=%2Fassistant(&expired=1)?$/);
   });
 });

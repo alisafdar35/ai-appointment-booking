@@ -1,12 +1,15 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENT_REPLAY_HEADER,
   availabilitySchema,
   cancelAppointmentSchema,
   createAppointmentSchema,
+  idempotencyKeySchema,
   listAppointmentsSchema,
 } from '@appt/shared';
-import { notFound } from '../../lib/errors.js';
+import { badRequest, notFound } from '../../lib/errors.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import { writeLimiter } from '../../middleware/rateLimit.js';
@@ -40,17 +43,39 @@ appointmentsRouter.get(
 /**
  * POST /api/appointments — create a booking.
  * 201 on success. 409 if the slot is taken, 422 if outside hours or in the past.
+ *
+ * With an Idempotency-Key header, a retry of a booking that succeeded gets the
+ * original 201 back (marked Idempotent-Replayed) instead of a second booking.
  */
 appointmentsRouter.post(
   '/',
   writeLimiter,
   validate(createAppointmentSchema),
   asyncHandler(async (req, res) => {
-    const appointment = await service.createAppointmentOrThrow(ctxFrom(req), req.body);
-    // Push to the customer's other open tabs and to the tenant's staff, so
-    // their dashboards update without a refetch.
-    emitAppointmentCreated(req.auth!.bid, appointment);
-    res.status(201).json({ appointment });
+    const rawKey = req.header(IDEMPOTENCY_KEY_HEADER);
+    if (rawKey === undefined) {
+      const appointment = await service.createAppointmentOrThrow(ctxFrom(req), req.body);
+      // Push to the customer's other open tabs and to the tenant's staff, so
+      // their dashboards update without a refetch.
+      emitAppointmentCreated(req.auth!.bid, appointment);
+      res.status(201).json({ appointment });
+      return;
+    }
+
+    const key = idempotencyKeySchema.safeParse(rawKey);
+    if (!key.success) {
+      throw badRequest('Some fields need attention', {
+        [IDEMPOTENCY_KEY_HEADER]: key.error.issues.map((i) => i.message),
+      });
+    }
+    const result = await service.createAppointmentIdempotent(ctxFrom(req), req.body, key.data);
+    if (result.replayed) {
+      // The original request already announced the booking.
+      res.set(IDEMPOTENT_REPLAY_HEADER, 'true').status(201).json(result.body);
+      return;
+    }
+    emitAppointmentCreated(req.auth!.bid, result.appointment);
+    res.status(201).json({ appointment: result.appointment });
   }),
 );
 

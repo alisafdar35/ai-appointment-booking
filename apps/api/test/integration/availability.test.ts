@@ -3,10 +3,10 @@ import { after, before, describe, it } from 'node:test';
 import type { AvailabilityDto } from '@appt/shared';
 import { assertApiError } from '../helpers/assertions.js';
 import { book, instant } from '../helpers/booking.js';
-import { SEED, addDays, freshDate, futureDate, nextDstTransition } from '../helpers/fixtures.js';
+import { SEED, addDays, freshDate, futureDate, nextDstTransition, pastDate } from '../helpers/fixtures.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient } from '../helpers/apiClient.js';
-import { nowTimeInZone } from '../../src/lib/time.js';
+import { nowTimeInZone, todayInZone } from '../../src/lib/time.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -139,15 +139,17 @@ describe('availability', () => {
 
   describe('time', () => {
     it('reports every slot on a past day as unavailable', async () => {
-      const a = await slotsFor(customer, SEED.services.routineCheckup.id, futureDate(-1));
+      const a = await slotsFor(customer, SEED.services.routineCheckup.id, pastDate(1));
       assert.equal(a.slots.length, 16);
       assert.deepEqual(taken(a), times(a));
     });
 
     it('reports slots earlier today as unavailable and later ones as free', async () => {
-      const today = futureDate(0);
+      // Day and time read from one instant, so midnight cannot fall between them.
+      const at = new Date();
+      const today = todayInZone(SEED.bluewave.timezone, at);
       const nowMinutes = (() => {
-        const [h, m] = nowTimeInZone(SEED.bluewave.timezone).split(':').map(Number) as [number, number];
+        const [h, m] = nowTimeInZone(SEED.bluewave.timezone, at).split(':').map(Number) as [number, number];
         return h * 60 + m;
       })();
       const a = await slotsFor(customer, SEED.services.routineCheckup.id, today);

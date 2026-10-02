@@ -242,6 +242,38 @@ describe('auth', () => {
       assert.equal(ownTenant.status, 201);
     });
 
+    it('does not create a second workspace when the same owner signs up again, whatever the email’s case', async () => {
+      const email = uniqueEmail('again');
+      const body = { email, password: STRONG_PASSWORD, fullName: 'Ada Again', businessName: 'Again Studio' };
+      assert.equal((await app.client().post('/api/auth/signup', body)).status, 201);
+
+      for (const retry of [body, { ...body, email: email.toUpperCase() }, { ...body, businessName: 'Another Name' }]) {
+        const error = assertApiError(await app.client().post('/api/auth/signup', retry), 409, 'EMAIL_TAKEN');
+        assert.match(error.message, /already owns a workspace/);
+      }
+      const { rows } = await app.db.query('SELECT count(*)::int AS n FROM users WHERE email = $1', [email]);
+      assert.equal(rows[0].n, 1, 'no extra account or business');
+    });
+
+    it('lets exactly one of several simultaneous workspace signups with the same email win (a double-clicked submit)', async () => {
+      const email = uniqueEmail('doubleclick');
+      const body = { email, password: STRONG_PASSWORD, fullName: 'Dub Click', businessName: 'Click Co' };
+      const results = await Promise.all(Array.from({ length: 4 }, () => app.client().post('/api/auth/signup', body)));
+
+      assert.equal(results.filter((r) => r.status === 201).length, 1);
+      for (const loser of results.filter((r) => r.status !== 201)) assertApiError(loser, 409, 'EMAIL_TAKEN');
+      const { rows } = await app.db.query(
+        `SELECT count(DISTINCT u.business_id)::int AS n FROM users u WHERE u.email = $1`,
+        [email],
+      );
+      assert.equal(rows[0].n, 1);
+    });
+
+    it('rejects an empty body, naming every required field', async () => {
+      const error = assertApiError(await app.client().post('/api/auth/signup', {}), 400, 'VALIDATION_FAILED');
+      assert.deepEqual(Object.keys(error.details ?? {}).sort(), ['email', 'fullName', 'password']);
+    });
+
     it('lets exactly one of several simultaneous signups with the same email win', async () => {
       const body = {
         email: uniqueEmail('race'),
@@ -644,29 +676,32 @@ describe('auth', () => {
       assert.ok(res.setCookies.some((c) => c.startsWith('appt_refresh=;')));
     });
 
-    it('lets only one of several simultaneous refreshes with the same token succeed', async () => {
+    it('serialises simultaneous refreshes with the same token, leaving exactly one live successor', async () => {
       const client = await freshCustomer();
       const token = refreshCookieOf(client);
-      const attempt = () => {
-        const tab = app.client();
-        tab.setCookie('appt_refresh', token, '/api/auth');
-        return tab.post('/api/auth/refresh');
-      };
+      const tabs = [app.client(), app.client(), app.client()];
+      for (const tab of tabs) tab.setCookie('appt_refresh', token, '/api/auth');
 
-      const results = await Promise.all([attempt(), attempt(), attempt()]);
+      const results = await Promise.all(tabs.map((tab) => tab.post('/api/auth/refresh')));
 
-      assert.equal(results.filter((r) => r.status === 200).length, 1, 'a single-use token must be redeemable once');
-      for (const loser of results.filter((r) => r.status !== 200)) assertApiError(loser, 401, 'SESSION_SUPERSEDED');
+      // Each later one finds the successor unused and takes it over (an
+      // abandoned rotation), so all are answered, one after another, and only
+      // the last pair issued survives.
+      assert.deepEqual(results.map((r) => r.status), [200, 200, 200]);
+      assert.equal(await liveTokens(client.user!.id), 1, 'a token is never redeemed into two live sessions');
+      const live = await Promise.all(tabs.map((tab) => tab.fork().post('/api/auth/refresh')));
+      assert.equal(live.filter((r) => r.status === 200).length, 1, 'exactly one tab holds the surviving token');
     });
 
     describe('two tabs racing to refresh (the grace window)', () => {
-      it('answers the losing tab SESSION_SUPERSEDED and keeps every session alive', async () => {
+      it('answers the losing tab SESSION_SUPERSEDED, once the winner has used its successor, and keeps every session alive', async () => {
         const browser = await freshCustomer();
         const otherDevice = app.client();
         await otherDevice.login(browser.user!.email, STRONG_PASSWORD);
         const tab = browser.fork();
 
         assert.equal((await browser.post('/api/auth/refresh')).status, 200);
+        assert.equal((await browser.post('/api/auth/refresh')).status, 200, 'the winning tab has moved on');
         const error = assertApiError(await tab.post('/api/auth/refresh'), 401, 'SESSION_SUPERSEDED');
         assert.match(error.message, /another tab/);
 
@@ -679,10 +714,41 @@ describe('auth', () => {
         const browser = await freshCustomer();
         const tab = browser.fork();
         await browser.post('/api/auth/refresh');
+        await browser.post('/api/auth/refresh');
 
         const res = await tab.post('/api/auth/refresh');
         assert.equal(res.status, 401);
         assert.deepEqual(res.setCookies, []);
+      });
+
+      it('recovers an abandoned rotation: the successor never arrived, so a fresh pair replaces it', async () => {
+        const browser = await freshCustomer();
+        const otherDevice = app.client();
+        await otherDevice.login(browser.user!.email, STRONG_PASSWORD);
+        // `lost` is the browser whose refresh response never arrived: it still
+        // holds the old token, while the server has rotated it to `browser`'s.
+        const lost = browser.fork();
+        assert.equal((await browser.post('/api/auth/refresh')).status, 200);
+
+        const res = await lost.post('/api/auth/refresh');
+        assert.equal(res.status, 200, 'not SESSION_SUPERSEDED: no newer cookie will ever reach this browser');
+        assert.ok(res.setCookies.some((c) => c.startsWith('appt_refresh=') && !c.startsWith('appt_refresh=;')));
+        assert.notEqual(refreshCookieOf(lost), refreshCookieOf(browser));
+
+        assert.equal(await liveTokens(browser.user!.id), 2, 'the fresh pair and the other device; the unused successor is revoked');
+        // Had the lost response arrived after all, its token is superseded, not recovered again.
+        assertApiError(await browser.fork().post('/api/auth/refresh'), 401, 'SESSION_SUPERSEDED');
+        assert.equal((await lost.post('/api/auth/refresh')).status, 200, 'the recovered session carries on');
+        assert.equal((await otherDevice.post('/api/auth/refresh')).status, 200, 'other devices are untouched');
+      });
+
+      it('recovers a retry of a recovered token too, if that response was lost as well', async () => {
+        const browser = await freshCustomer();
+        const lost = browser.fork();
+        assert.equal((await browser.post('/api/auth/refresh')).status, 200);
+        assert.equal((await lost.fork().post('/api/auth/refresh')).status, 200, 'first retry: response lost again');
+        assert.equal((await lost.post('/api/auth/refresh')).status, 200, 'second retry still recovers');
+        assert.equal(await liveTokens(browser.user!.id), 1);
       });
 
       it('treats the same token as replay once the window has passed', async () => {

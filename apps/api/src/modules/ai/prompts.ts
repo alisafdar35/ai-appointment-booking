@@ -1,11 +1,14 @@
 import type { BookingSlots, ServiceDto } from '@appt/shared';
 import { humanDate, humanTime } from '../../lib/time.js';
+import { formatPrice } from './copy.js';
 
 export interface PromptContext {
   businessName: string;
   timezone: string;
   opensAt: string;
   closesAt: string;
+  /** ISO weekdays the business takes bookings, 1 = Monday ... 7 = Sunday. */
+  openDays: number[];
   today: string;
   nowTime: string;
   services: ServiceDto[];
@@ -40,7 +43,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   const catalogue = ctx.services.length
     ? ctx.services
         .map((s) => {
-          const price = s.priceCents > 0 ? `, $${(s.priceCents / 100).toFixed(2)}` : '';
+          const price = s.priceCents > 0 ? `, ${formatPrice(s.priceCents)}` : '';
           return `  - ${s.name} (${s.durationMinutes} min${price})${s.description ? ` — ${s.description}` : ''}`;
         })
         .join('\n')
@@ -52,7 +55,8 @@ export function buildSystemPrompt(ctx: PromptContext): string {
 
 CURRENT CONTEXT
   Today is ${humanDate(ctx.today)} (${ctx.today}). The local time is ${humanTime(ctx.nowTime)}.
-  All times are in ${ctx.timezone}. The business is open ${humanTime(ctx.opensAt)} to ${humanTime(ctx.closesAt)}.
+  All times are in ${ctx.timezone}. The business is open ${openDaysPhrase(ctx.openDays)}, ${humanTime(ctx.opensAt)} to ${humanTime(ctx.closesAt)}.
+  Never propose a day it is closed.
   You are speaking with ${ctx.customerName}.
 
 SERVICES AVAILABLE
@@ -64,7 +68,8 @@ ${known}
 YOUR TASK
   Collect three things: which service, which date, and what time. Ask for only
   what is still missing — never re-ask for something listed above as known.
-  Ask about at most two missing details in one message.
+  If nothing is known yet, ask for the service, day and time in one question
+  and name the services on offer.
 
   When all three are known, summarise the booking in full (service, day, date,
   time) and ask the user to confirm. Set intent to "confirming" only once the
@@ -73,6 +78,8 @@ YOUR TASK
 RULES
   - Resolve relative dates ("tomorrow", "next Friday") using today's date above.
   - Convert spoken times to 24-hour form: "half two" or "2:30pm" is "14:30".
+  - Never guess. If a time could be AM or PM, or a date like "03/04" could be
+    read two ways, leave it out and ask which one the user meant.
   - Only ever offer services from the list above. If the user asks for something
     else, say it is not offered and name the closest alternatives.
   - Only propose times inside opening hours, and never a time in the past.
@@ -80,10 +87,20 @@ RULES
     your job is to gather details and ask for confirmation.
   - If the user asks something unrelated to booking, answer briefly and steer
     back. Set intent to "other".
+  - You can see only this conversation. You have no access to other customers
+    or their bookings; if asked, say so and offer to help with a booking.
   - Keep replies to one or two short sentences. No bullet lists, no markdown.
 
 You must call the ${'`respond_to_booking_request`'} function on every turn, including
 when you are only asking a question.`;
+}
+
+const ISO_WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+/** [1..7] -> "every day"; [1..5] -> "Monday, Tuesday, Wednesday, Thursday, Friday". */
+export function openDaysPhrase(openDays: number[]): string {
+  const days = [...new Set(openDays)].sort((a, b) => a - b);
+  return days.length === 7 ? 'every day' : `on ${days.map((d) => ISO_WEEKDAYS[d - 1]).join(', ')}`;
 }
 
 /** Render the draft so the model can see what it already has. */

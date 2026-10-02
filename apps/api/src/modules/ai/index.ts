@@ -6,7 +6,8 @@ import { MistralProvider } from './mistral.js';
 import { recordAiInteraction, type AiOutcome } from './logs.js';
 import { ProviderError, type ProviderInput, type ProviderOutput } from './provider.js';
 
-export { confirmationPrompt } from './copy.js';
+export { confirmationPrompt, heldPrompt } from './copy.js';
+export { negates } from './fallback.js';
 export type { ProviderInput, ProviderOutput } from './provider.js';
 
 const mistral = new MistralProvider();

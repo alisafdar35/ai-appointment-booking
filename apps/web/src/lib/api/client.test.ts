@@ -141,6 +141,47 @@ describe('session renewal', () => {
     expect(getAccessToken()).toBe('fresh-token');
   });
 
+  it('sends extra headers (an Idempotency-Key) on the request and again on its replay after a refresh', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json(errorBody('UNAUTHENTICATED'), 401))
+      .mockResolvedValueOnce(json(auth('fresh-token')))
+      .mockResolvedValueOnce(json({ appointment: { id: 'a1' } }, 201));
+
+    await apiRequest('/appointments', { method: 'POST', body: {}, headers: { 'Idempotency-Key': 'attempt-1' } });
+
+    const keys = callsTo('/api/appointments').map(([, init]) => (init?.headers as Record<string, string>)['Idempotency-Key']);
+    expect(keys).toEqual(['attempt-1', 'attempt-1']);
+  });
+
+  it('never surfaces the server\'s debug detail or a proxy\'s stack trace page', async () => {
+    fetchMock.mockResolvedValueOnce(
+      json({ error: { code: 'INTERNAL', message: 'Something went wrong on our side.', debug: 'relation "users" does not exist' } }, 500),
+    );
+    const enveloped = await apiRequest('/services').catch((error: unknown) => error);
+    expect(enveloped).toBeInstanceOf(ApiError);
+    expect((enveloped as ApiError).message).toBe('Something went wrong on our side.');
+    expect(JSON.stringify(enveloped)).not.toContain('relation');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response('<pre>TypeError: x is undefined\n    at Object.<anonymous> (/srv/app/index.js:1:1)</pre>', { status: 500 }),
+    );
+    const raw = await apiRequest('/services').catch((error: unknown) => error);
+    expect((raw as ApiError).message).toBe('The service is temporarily unavailable. Please try again in a moment.');
+  });
+
+  it('never ends the session over a data request that times out or hits a 5xx (a server waking up)', async () => {
+    const expired = vi.fn();
+    const unsubscribe = onSessionExpired(expired);
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValueOnce(new Response('', { status: 503 }));
+
+    await expect(apiRequest('/appointments')).rejects.toMatchObject({ code: 'NETWORK' });
+    await expect(apiRequest('/appointments')).rejects.toMatchObject({ status: 503 });
+
+    expect(callsTo('/api/auth/refresh')).toHaveLength(0);
+    expect(expired).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
   it('shares ONE refresh between concurrent requests (refresh tokens rotate)', async () => {
     let servicesCalls = 0;
     fetchMock.mockImplementation(async (url) => {

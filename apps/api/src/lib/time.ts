@@ -42,27 +42,38 @@ export function zonedParts(instant: Date, timeZone: string) {
   };
 }
 
+/**
+ * The instant the conversation layer treats as "now" when it works out today's
+ * date and time for a business. Only tests replace it, to pin "today" to a
+ * chosen weekday; booking rules never read it — "in the past" is decided by
+ * the database's now(), so pinning this cannot let a past slot be booked.
+ */
+export const clock = { now: (): Date => new Date() };
+
 /** Today's calendar date in a business's timezone, as YYYY-MM-DD. */
-export function todayInZone(timeZone: string, now: Date = new Date()): string {
+export function todayInZone(timeZone: string, now: Date = clock.now()): string {
   const p = zonedParts(now, timeZone);
   return `${p.year}-${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
 }
 
 /** Current wall-clock time in a business's timezone, as HH:MM. */
-export function nowTimeInZone(timeZone: string, now: Date = new Date()): string {
+export function nowTimeInZone(timeZone: string, now: Date = clock.now()): string {
   const p = zonedParts(now, timeZone);
   return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
 }
 
 /**
- * A `Date` carrying the same wall-clock fields the business sees.
+ * A `Date` whose local fields are the given wall-clock date and time.
  *
  * Used only as a reference point for the natural-language date parser, which
  * resolves "tomorrow" relative to the local fields of the Date it is handed.
+ * Built from the turn's own `today` and `nowTime` rather than the clock, so a
+ * message is read against the same day the prompt and the guardrails use.
  */
-export function zonedNow(timeZone: string, now: Date = new Date()): Date {
-  const p = zonedParts(now, timeZone);
-  return new Date(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+export function wallClock(date: string, time: string): Date {
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
+  const [hh, mm] = time.split(':').map(Number) as [number, number];
+  return new Date(y, m - 1, d, hh, mm);
 }
 
 /**

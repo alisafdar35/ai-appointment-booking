@@ -3,7 +3,7 @@ import { after, before, describe, it } from 'node:test';
 import type { AppointmentDto, AuthResponse } from '@appt/shared';
 import { assertApiError, eventually, isUtcIso, isUuid } from '../helpers/assertions.js';
 import { book, instant } from '../helpers/booking.js';
-import { SEED, freshDate, futureDate } from '../helpers/fixtures.js';
+import { SEED, freshDate, futureDate, pastDate } from '../helpers/fixtures.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient } from '../helpers/apiClient.js';
 
@@ -266,12 +266,12 @@ describe('appointments', () => {
 
   describe('business rules', () => {
     it('refuses a time that is in the past', async () => {
-      assertApiError(await book(customer, { date: futureDate(-1), time: '10:00' }), 422, 'APPOINTMENT_IN_PAST');
-      assertApiError(await book(customer, { date: futureDate(-30), time: '09:00' }), 422, 'APPOINTMENT_IN_PAST');
+      assertApiError(await book(customer, { date: pastDate(1), time: '10:00' }), 422, 'APPOINTMENT_IN_PAST');
+      assertApiError(await book(customer, { date: pastDate(30), time: '09:00' }), 422, 'APPOINTMENT_IN_PAST');
     });
 
     it('checks "in the past" before opening hours', async () => {
-      assertApiError(await book(customer, { date: futureDate(-1), time: '03:00' }), 422, 'APPOINTMENT_IN_PAST');
+      assertApiError(await book(customer, { date: pastDate(1), time: '03:00' }), 422, 'APPOINTMENT_IN_PAST');
     });
 
     const outsideHours: [string, string, string?][] = [

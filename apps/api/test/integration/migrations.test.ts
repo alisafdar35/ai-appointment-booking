@@ -90,6 +90,7 @@ describe('migrations and seed', () => {
         'businesses',
         'chat_messages',
         'chat_sessions',
+        'idempotency_keys',
         'refresh_tokens',
         'schema_migrations',
         'services',
@@ -112,6 +113,8 @@ describe('migrations and seed', () => {
         'users_business_email_key',
         'users_email_idx',
         'services_business_name_key',
+        'idempotency_keys_pkey',
+        'idempotency_keys_created_idx',
       ]) {
         assert.ok(names.has(expected), `missing index ${expected}`);
       }

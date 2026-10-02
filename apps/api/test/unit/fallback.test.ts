@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { EMPTY_SLOTS, type BookingSlots, type ServiceDto } from '@appt/shared';
+import { referenceToday } from '../helpers/clock.js';
+import { CONSENT_TABLE } from '../helpers/consent.js';
 import { addDays, nextWeekday } from '../helpers/fixtures.js';
-import { todayInZone } from '../../src/lib/time.js';
-import { FallbackProvider, matchBareHour, matchOrdinalDay, matchService, resolveMeridiem } from '../../src/modules/ai/fallback.js';
+import { FallbackProvider, answerAboutService, isAffirmative, matchBareHour, matchOrdinalDay, matchService, resolveMeridiem } from '../../src/modules/ai/fallback.js';
 import type { ProviderInput } from '../../src/modules/ai/provider.js';
 
 /**
@@ -11,12 +12,15 @@ import type { ProviderInput } from '../../src/modules/ai/provider.js';
  * unavailable, so its behaviour on the phrases people actually type is a
  * product guarantee, not an implementation detail.
  *
- * chrono resolves relative dates against the real clock, so expectations are
- * computed from today's date rather than hard-coded.
+ * Relative dates resolve against the input's `today`, pinned by TEST_TODAY
+ * (see helpers/clock.ts), so expectations are computed from it.
  */
 
 const TIMEZONE = 'America/New_York';
-const today = todayInZone(TIMEZONE);
+const today = referenceToday(TIMEZONE);
+const weekdayName = (date: string) =>
+  new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
+const isoWeekday = (date: string) => ((new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7) + 1;
 
 const catalogue: ServiceDto[] = [
   ['Routine Checkup', 30],
@@ -28,24 +32,26 @@ const catalogue: ServiceDto[] = [
   name: name as string,
   description: null,
   durationMinutes: durationMinutes as number,
-  priceCents: 0,
+  priceCents: name === 'Teeth Whitening' ? 19900 : 0,
 }));
 
 const provider = new FallbackProvider();
 
-function turn(text: string, draft: Partial<BookingSlots> = {}, services = catalogue) {
+function turn(text: string, draft: Partial<BookingSlots> = {}, overrides: Partial<ProviderInput> = {}) {
   const input: ProviderInput = {
     businessName: 'Bluewave Dental',
     timezone: TIMEZONE,
     opensAt: '09:00',
     closesAt: '17:00',
+    openDays: [1, 2, 3, 4, 5, 6, 7],
     today,
     nowTime: '10:00',
-    services,
+    services: catalogue,
     draft: { ...EMPTY_SLOTS, ...draft },
     customerName: 'Marcus',
     history: [{ role: 'user', content: text }],
     requestId: 'req-test-0001',
+    ...overrides,
   };
   return provider.respond(input);
 }
@@ -65,8 +71,11 @@ describe('fallback date extraction', () => {
   });
 
   it('resolves a weekday name to that weekday', async () => {
-    const { slots } = await turn('monday');
-    assert.equal(slots.date, nextWeekday(today, 1));
+    // Not today's weekday: that one is ambiguous (see below).
+    const day = (new Date(`${today}T12:00:00Z`).getUTCDay() + 2) % 7;
+    const name = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'][day]!;
+    const { slots } = await turn(name);
+    assert.equal(slots.date, nextWeekday(today, day));
   });
 
   it('reads an explicit month and day', async () => {
@@ -174,7 +183,7 @@ describe('fallback times said without am or pm', () => {
     assert.equal(await timeOf('can I come in the afternoon, about 3:30?'), '15:30');
   });
 
-  it('reads a bare 1–7 as PM: nobody books a dentist for 3 in the morning', async () => {
+  it('places a bare hour when only one reading is inside opening hours: 3 is 3 PM for a 9–5 business', async () => {
     assert.equal(await timeOf('at 3'), '15:00');
     assert.equal(await timeOf('around 4'), '16:00');
     assert.equal(await timeOf('3ish works'), '15:00');
@@ -192,6 +201,10 @@ describe('fallback times said without am or pm', () => {
     assert.equal(await timeOf('in the evening around 5'), '17:00');
   });
 
+  it('reads a leading zero as 24-hour notation', async () => {
+    assert.equal(await timeOf('at 08:15'), '08:15');
+  });
+
   it('does not read a count of something as a time', async () => {
     assert.equal(matchBareHour('for about 3 weeks'), null);
     assert.equal(matchBareHour('at 2 people'), null);
@@ -203,6 +216,7 @@ describe('fallback times said without am or pm', () => {
 describe('resolveMeridiem', () => {
   const nineToFive = { opensAt: '09:00', closesAt: '17:00' };
   const earlyShift = { opensAt: '06:00', closesAt: '14:00' };
+  const longDay = { opensAt: '08:00', closesAt: '22:00' };
 
   it('takes the reading that falls inside opening hours when only one does', () => {
     assert.equal(resolveMeridiem(7, 0, 'at 7', earlyShift), 7, '7 AM is open, 7 PM is not');
@@ -210,15 +224,130 @@ describe('resolveMeridiem', () => {
     assert.equal(resolveMeridiem(10, 0, 'at 10', nineToFive), 10);
   });
 
-  it('falls back to PM for 1–7 and AM for 8–11 when the hours do not decide', () => {
-    assert.equal(resolveMeridiem(6, 0, 'at 6', nineToFive), 18, 'neither 6 AM nor 6 PM is open');
-    assert.equal(resolveMeridiem(8, 0, 'at 8', nineToFive), 8);
+  it('declines to choose when neither reading can start an appointment', () => {
+    assert.equal(resolveMeridiem(5, 0, 'at 5', nineToFive), null, '5 AM is before opening, 5 PM is closing time');
+    assert.equal(resolveMeridiem(6, 0, 'at 6', nineToFive), null);
+    assert.equal(resolveMeridiem(8, 0, 'at 8', nineToFive), null);
+  });
+
+  it('declines to choose when both readings are inside opening hours', () => {
+    assert.equal(resolveMeridiem(9, 0, 'at 9', longDay), null);
+    assert.equal(resolveMeridiem(9, 0, 'at 9 in the morning', longDay), 9, 'a stated part of the day still decides');
   });
 
   it('leaves 12 and 24-hour values alone', () => {
     assert.equal(resolveMeridiem(12, 0, 'at 12', nineToFive), 12);
     assert.equal(resolveMeridiem(15, 0, 'at 15', nineToFive), 15);
     assert.equal(resolveMeridiem(0, 30, 'at 0:30', nineToFive), 0);
+  });
+});
+
+describe('fallback clarifications: ask rather than guess', () => {
+  const complete: Partial<BookingSlots> = { serviceName: 'Routine Checkup', date: '2031-04-22', time: '10:00' };
+
+  it('asks AM or PM for "At 5.", and stores no time', async () => {
+    const out = await turn('At 5.', { serviceName: 'Routine Checkup', date: '2031-04-22' });
+    assert.equal(out.slots.time, undefined);
+    assert.deepEqual(out.clarify, ['time']);
+    assert.match(out.reply, /Did you mean 5:00 AM or 5:00 PM\? We're open 9:00 AM to 5:00 PM/);
+  });
+
+  it('reopens a confirmed time the user is changing ambiguously, so "yes" cannot book the old one', async () => {
+    const out = await turn('actually at 8', complete);
+    assert.deepEqual(out.clarify, ['time']);
+    assert.equal(out.intent, 'collecting');
+    assert.ok(!/Shall I book it/.test(out.reply), out.reply);
+  });
+
+  it('asks which date "03/04" means, and stores no date', async () => {
+    const out = await turn('Book for 03/04.', { serviceName: 'Routine Checkup' });
+    assert.equal(out.slots.date, undefined);
+    assert.deepEqual(out.clarify, ['date']);
+    assert.match(out.reply, /Did you mean \w+, March 4, \d{4} or \w+, April 3, \d{4}\?/);
+  });
+
+  it('does not ask about a numeric date that reads one way only', async () => {
+    for (const text of ['13/04', '04/04', 'on 2031-04-22']) {
+      const out = await turn(text);
+      assert.equal(out.clarify, undefined, text);
+      assert.ok(out.slots.date, text);
+    }
+  });
+
+  it('asks whether today’s weekday means today or next week while today is still bookable', async () => {
+    const name = weekdayName(today);
+    const out = await turn(`Book me on ${name}.`);
+    assert.deepEqual(out.clarify, ['date']);
+    assert.equal(out.slots.date, undefined);
+    assert.match(out.reply, new RegExp(`Did you mean ${name}, .* or ${name}, .*\\?`));
+
+    assert.equal((await turn(`next ${name}`)).clarify, undefined, '"next" settles it');
+  });
+
+  describe('today’s weekday when today cannot be booked: a week today, without asking', () => {
+    const name = weekdayName(today);
+    const weekToday = addDays(today, 7);
+    const resolvesToNextWeek = async (text: string, overrides: Partial<ProviderInput>, why: string) => {
+      const out = await turn(text, {}, overrides);
+      assert.equal(out.clarify, undefined, why);
+      assert.equal(out.slots.date, weekToday, why);
+    };
+
+    it('after closing time', async () => {
+      await resolvesToNextWeek(`Book me on ${name}.`, { nowTime: '17:30' }, 'closed for the day');
+    });
+
+    it('when no appointment slot is left before closing', async () => {
+      // The next slot on the 30-minute grid after 16:40 is 17:00, closing time.
+      await resolvesToNextWeek(`Book me on ${name}.`, { nowTime: '16:40' }, 'no slot left today');
+    });
+
+    it('when the time asked for has already passed today', async () => {
+      await resolvesToNextWeek(`${name} at 9am`, { nowTime: '11:00' }, '9 AM today is gone');
+      const later = await turn(`${name} at 3pm`, {}, { nowTime: '11:00' });
+      assert.deepEqual(later.clarify, ['date'], '3 PM today is still ahead, so both readings stand');
+    });
+
+    it('when the business does not open on that weekday at all', async () => {
+      const closed = [1, 2, 3, 4, 5, 6, 7].filter((d) => d !== isoWeekday(today));
+      await resolvesToNextWeek(`Book me on ${name}.`, { openDays: closed }, 'neither reading is bookable');
+    });
+
+    it('keeps the service and time stated alongside it', async () => {
+      const out = await turn(`checkup on ${name} at 2pm`, {}, { nowTime: '17:30' });
+      assert.deepEqual(out.slots, { serviceName: 'Routine Checkup', date: weekToday, time: '14:00' });
+    });
+  });
+
+  it('asks for the service, day and time together when nothing is known', async () => {
+    const out = await turn('I want an appointment.');
+    assert.match(out.reply, /Which service would you like, and what day and time suit you\?/);
+    assert.match(out.reply, /Routine Checkup/);
+    assert.match(out.reply, /9:00 AM to 5:00 PM/);
+  });
+
+  it('names the open days when asking for a day, if the business is closed on some', async () => {
+    const out = await provider.respond({
+      businessName: 'Bluewave Dental',
+      timezone: TIMEZONE,
+      opensAt: '09:00',
+      closesAt: '17:00',
+      openDays: [1, 2, 3, 4, 5],
+      today,
+      nowTime: '10:00',
+      services: catalogue,
+      draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' },
+      customerName: 'Marcus',
+      history: [{ role: 'user', content: 'hello' }],
+      requestId: 'req-test-0001',
+    });
+    assert.match(out.reply, /We're open on Monday, Tuesday, Wednesday, Thursday, Friday, 9:00 AM to 5:00 PM\./);
+  });
+
+  it('keeps the draft and does not confirm on an unrelated question', async () => {
+    const out = await turn('do you have parking?', complete);
+    assert.deepEqual(out.slots, {});
+    assert.equal(out.intent, 'collecting');
   });
 });
 
@@ -332,5 +461,34 @@ describe('fallback intent and replies', () => {
   it('only reports slots mentioned on this turn, leaving the stored draft to the caller', async () => {
     const out = await turn('make it 3pm', draft);
     assert.deepEqual(out.slots, { time: '15:00' });
+  });
+});
+
+describe('consent is an allow-list of plain agreement', () => {
+  const shown: Partial<BookingSlots> = { serviceName: 'Teeth Whitening', date: '2031-04-22', time: '11:00' };
+
+  for (const [text, agrees] of CONSENT_TABLE) {
+    it(`${agrees ? 'agrees' : 'does not agree'}: "${text}"`, async () => {
+      assert.equal(isAffirmative(text), agrees);
+      assert.equal((await turn(text, shown)).intent === 'confirming', agrees);
+    });
+  }
+
+  it('answers "Can you confirm the price first?" from the catalogue instead of booking', async () => {
+    const out = await turn('Can you confirm the price first?', shown);
+    assert.equal(out.intent, 'other', 'an aside: the chat repeats the summary after it');
+    assert.equal(out.reply, 'Teeth Whitening takes 60 minutes and costs $199.00.');
+  });
+
+  it('updates the time on "yes, but make it 3pm" rather than agreeing', async () => {
+    const out = await turn('yes, but make it 3pm', shown);
+    assert.equal(out.intent, 'collecting');
+    assert.deepEqual(out.slots, { time: '15:00' });
+  });
+
+  it('answers a price or length question only for a known catalogue service', () => {
+    assert.equal(answerAboutService('how long is it?', 'Routine Checkup', catalogue), 'Routine Checkup takes 30 minutes and has no charge.');
+    assert.equal(answerAboutService('how much?', null, catalogue), null);
+    assert.equal(answerAboutService('yes please', 'Routine Checkup', catalogue), null);
   });
 });

@@ -39,8 +39,11 @@ export async function clickAndAwaitTurn(page: Page, target: Locator): Promise<vo
 
 async function conversationList(page: Page): Promise<Locator> {
   const sidebar = page.getByRole('complementary', { name: 'Conversations' });
+  const opener = page.getByRole('button', { name: 'Conversations' });
+  // Wait for the workspace to render one or the other before deciding which layout this is.
+  await expect.poll(async () => (await sidebar.isVisible()) || (await opener.isVisible())).toBe(true);
   if (await sidebar.isVisible()) return sidebar;
-  await page.getByRole('button', { name: 'Conversations' }).click();
+  await opener.click();
   return page.getByRole('dialog', { name: 'Conversations' });
 }
 

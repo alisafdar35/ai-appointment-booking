@@ -21,7 +21,12 @@ Integration files are split by concern, not by endpoint: `auth`, `appointments`,
 `availability` (including DST), `chat` (deterministic engine), `ai-mistral`
 (the provider against a local stub), `http` (envelope, request ids, body limits,
 CORS, health), `rate-limit`, `production-mode`, `realtime`, `schema` (the
-constraints in `db/verify.sql`, checked directly), `migrations` (runner and seed).
+constraints in `db/verify.sql`, checked directly), `migrations` (runner and seed),
+`authz` (every protected endpoint without a session, with a bad token, and with
+an identity claimed in the body), `booking-integrity` (Idempotency-Key, double
+submits, a slot taken while the form is open, database failure at insert and at
+COMMIT, closed weekdays, DST gaps and repeats, near-midnight zones) and
+`timezone-independence` (the API process and the database sessions in other zones).
 
 ## How a test file works
 
@@ -52,6 +57,12 @@ end in `_test`; the dev database is never touched. Override the server with
 
 ## Conventions
 
+- **A pinned "today" for relative dates.** `helpers/clock.ts` places the reference day on the
+  `TEST_TODAY` weekday (default Wednesday) at least a week after the real date, at 10:00 business
+  time; unit tests pass it as the provider's `today`, and `chat`/`ai-mistral` pin the app's clock
+  to it. "In the past" stays the database's real `now()`, so past dates come from `pastDate()`.
+  Every weekday must pass:
+  `for d in monday tuesday wednesday thursday friday saturday sunday; do TEST_TODAY=$d npm test -w @appt/api; done`
 - **No hard-coded dates.** The seed anchors its bookings to `now()`, so tests ask
   `fixtures.ts` for dates (`freshDate()`, `futureDate(n)`, `nextDstTransition()`).
 - **Assert the envelope, not just the status.** `assertApiError(res, status, code)`

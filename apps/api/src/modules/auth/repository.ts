@@ -90,6 +90,16 @@ export async function findBusinessBySlug(slug: string, client: Queryable = pool)
   return rows[0] ?? null;
 }
 
+/** Held until the transaction ends; see the owner-signup rule in service.signup. */
+export async function lockOwnerEmail(client: Queryable, email: string): Promise<void> {
+  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended('owner-signup:' || lower($1), 0))`, [email]);
+}
+
+export async function ownsWorkspace(email: string, client: Queryable = pool): Promise<boolean> {
+  const { rows } = await client.query(`SELECT 1 FROM users WHERE email = $1 AND role = 'owner' LIMIT 1`, [email]);
+  return rows.length > 0;
+}
+
 export async function emailExistsInBusiness(
   businessId: string,
   email: string,
@@ -218,20 +228,60 @@ export async function revokeRefreshToken(
   return (rowCount ?? 0) > 0;
 }
 
+/** What a presented, already-revoked token's rotation looks like, read under row locks. */
+export interface RotationState {
+  /** Revoked within the grace window, on the database clock that wrote `revoked_at`. */
+  recent: boolean;
+  /** Itself the unused successor of a rotation that was abandoned and replaced. */
+  abandoned: boolean;
+  /** The token that replaced it; null when it was ended by a logout. */
+  successorId: string | null;
+  /** That successor is still live: nobody has presented or signed it out. */
+  successorUnused: boolean;
+}
+
 /**
- * Was this token consumed by a rotation (not a logout) within the last
- * `seconds`? Measured on the database clock, which wrote `revoked_at`, so
- * clock skew between API instances cannot widen or close the window.
+ * Lock a revoked token and its successor, one at a time and the presented
+ * token first, so two retries of one token queue on it and the second sees
+ * what the first left.
  */
-export async function wasRotatedWithin(id: string, seconds: number): Promise<boolean> {
-  const { rows } = await pool.query(
-    `SELECT 1 FROM refresh_tokens
-     WHERE id = $1
-       AND replaced_by IS NOT NULL
-       AND revoked_at > now() - make_interval(secs => $2)`,
-    [id, seconds],
+export async function lockRotation(client: Queryable, id: string, graceSeconds: number): Promise<RotationState> {
+  const { rows } = await client.query<{ replaced_by: string | null; abandoned: boolean; recent: boolean }>(
+    `SELECT replaced_by, abandoned, revoked_at > now() - make_interval(secs => $2) AS recent
+     FROM refresh_tokens WHERE id = $1 FOR UPDATE`,
+    [id, graceSeconds],
   );
-  return rows.length > 0;
+  const row = rows[0]!;
+  const successor = row.replaced_by
+    ? await client.query<{ unused: boolean }>(
+        'SELECT revoked_at IS NULL AS unused FROM refresh_tokens WHERE id = $1 FOR UPDATE',
+        [row.replaced_by],
+      )
+    : null;
+  return {
+    recent: row.recent,
+    abandoned: row.abandoned,
+    successorId: row.replaced_by,
+    successorUnused: successor?.rows[0]?.unused ?? false,
+  };
+}
+
+/**
+ * Replace the abandoned successor of `id` with `replacementId`: the successor
+ * is revoked and marked, and `id` now points at the replacement, so a further
+ * retry of `id` finds the replacement as its successor.
+ */
+export async function replaceAbandonedSuccessor(
+  client: Queryable,
+  id: string,
+  successorId: string,
+  replacementId: string,
+): Promise<void> {
+  await client.query(
+    `UPDATE refresh_tokens SET revoked_at = now(), replaced_by = $2, abandoned = true WHERE id = $1`,
+    [successorId, replacementId],
+  );
+  await client.query(`UPDATE refresh_tokens SET replaced_by = $2 WHERE id = $1`, [id, replacementId]);
 }
 
 /**

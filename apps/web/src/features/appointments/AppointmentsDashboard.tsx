@@ -1,14 +1,15 @@
 'use client';
 
 import { Plus } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AppointmentDto } from '@appt/shared';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Button } from '@/components/ui/Button';
 import { Tab, TabList, TabPanel, Tabs } from '@/components/ui/Tabs';
+import { discardInterruptedDraft, readInterruptedDraft } from '@/lib/interrupted-drafts';
 import { useBusinessTimezone, useCurrentUser } from '@/providers/AuthProvider';
 import { AppointmentList } from './AppointmentList';
-import { BookingDialog } from './BookingDialog';
+import { BOOKING_DRAFT_NAME, BookingDialog } from './BookingDialog';
 import { CancelDialog } from './CancelDialog';
 import { SummaryTiles } from './SummaryTiles';
 import { useAppointmentViews } from './hooks/useAppointmentViews';
@@ -19,6 +20,7 @@ import {
   formatCount,
   type AppointmentView,
 } from './lib/appointments';
+import type { BookingFormValues } from './lib/booking';
 
 const VIEW_TITLES: Record<AppointmentView, string> = { upcoming: 'Upcoming', past: 'Past', cancelled: 'Cancelled' };
 
@@ -44,7 +46,18 @@ export function AppointmentsDashboard() {
   const showCustomer = user.role !== 'customer';
 
   const [view, setView] = useState<AppointmentView>('upcoming');
-  const [bookingOpen, setBookingOpen] = useState(false);
+  // A booking the session ended in the middle of comes back, open, after signing in again.
+  const [restoredBooking, setRestoredBooking] = useState(() =>
+    readInterruptedDraft<BookingFormValues>(BOOKING_DRAFT_NAME, user.id),
+  );
+  const [bookingOpen, setBookingOpen] = useState(() => restoredBooking !== null);
+  useEffect(() => discardInterruptedDraft(BOOKING_DRAFT_NAME), []);
+
+  const onBookingOpenChange = (open: boolean) => {
+    setBookingOpen(open);
+    // Restored once: the next "New appointment" starts blank.
+    if (!open) setRestoredBooking(null);
+  };
   const [cancelTarget, setCancelTarget] = useState<AppointmentDto | null>(null);
   const panelsRef = useRef<HTMLDivElement>(null);
 
@@ -120,7 +133,12 @@ export function AppointmentsDashboard() {
         </Tabs>
       </div>
 
-      <BookingDialog open={bookingOpen} onOpenChange={setBookingOpen} onBooked={onBooked} />
+      <BookingDialog
+        open={bookingOpen}
+        onOpenChange={onBookingOpenChange}
+        onBooked={onBooked}
+        restored={restoredBooking}
+      />
       <CancelDialog
         appointment={cancelTarget}
         onOpenChange={(open) => !open && setCancelTarget(null)}

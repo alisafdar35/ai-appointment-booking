@@ -54,6 +54,13 @@ describe('classifyBookingError', () => {
   const apiError = (code: ApiError['code'], extra: Partial<ConstructorParameters<typeof ApiError>[0]> = {}) =>
     new ApiError({ status: 400, code, message: `server says ${code}`, ...extra });
 
+  it('shows a reused idempotency key (different details under one attempt) as a form-level message', () => {
+    expect(classifyBookingError(apiError('IDEMPOTENCY_KEY_REUSED', { status: 422 }))).toEqual({
+      kind: 'form',
+      message: 'server says IDEMPOTENCY_KEY_REUSED',
+    });
+  });
+
   it('treats a taken slot as a prompt to pick another time', () => {
     expect(classifyBookingError(apiError('SLOT_UNAVAILABLE'))).toEqual({
       kind: 'slot-taken',

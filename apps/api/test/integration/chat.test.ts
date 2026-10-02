@@ -3,7 +3,8 @@ import { after, before, describe, it } from 'node:test';
 import type { AssistantTurnDto, ChatSessionDto, ChatTranscriptDto } from '@appt/shared';
 import { assertApiError, eventually, isUuid } from '../helpers/assertions.js';
 import { book, instant } from '../helpers/booking.js';
-import { SEED, addDays, freshDate, futureDate } from '../helpers/fixtures.js';
+import { pinToday } from '../helpers/clock.js';
+import { SEED, addDays, freshDate, futureDate, pastDate } from '../helpers/fixtures.js';
 import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient, ApiResponse } from '../helpers/apiClient.js';
 import { shortDate } from '../../src/lib/time.js';
@@ -15,10 +16,14 @@ type Transcript = ChatTranscriptDto;
  * which is the engine every reviewer without a key will actually meet.
  *
  * Dates are written into messages as ISO dates ("on 2031-04-22 at 10am") where
- * a test needs a specific slot: chrono resolves "next monday" against the real
- * clock, which is fine for the one test about relative dates and a source of
- * collisions everywhere else.
+ * a test needs a specific slot: relative dates ("next monday") are kept to the
+ * tests about them. The app's "today" is pinned (TEST_TODAY, helpers/clock.ts)
+ * so those read the same on any day the suite runs.
  */
+const today = pinToday();
+const weekdayName = (date: string) =>
+  new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: 'UTC' }).format(new Date(`${date}T12:00:00Z`));
+
 describe('chat', () => {
   let app: TestApp;
   let customer: ApiClient;
@@ -187,23 +192,27 @@ describe('chat', () => {
       assert.equal(t3.action, 'confirm');
     });
 
-    it('reports a taken slot with real alternatives, and lets the user pick one', async () => {
+    /** A refusal in place of the summary: nothing to say "yes" to. */
+    const assertRefusedBeforeSummary = (t: AssistantTurnDto) => {
+      assert.equal(t.action, 'collect_info', 'no summary is shown for a slot the booking would refuse');
+      assert.ok(!/Just to confirm|Shall I book it/.test(t.message.content), t.message.content);
+      assert.equal(t.appointment, undefined);
+    };
+
+    it('refuses a taken slot before showing a summary, offers real alternatives, and lets the user pick one', async () => {
       const date = freshDate();
       assert.equal((await book(staff, { date, time: '10:00' })).status, 201);
 
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
-      assert.equal(t1.action, 'confirm');
-      const t2 = await turn(customer, 'yes', t1.sessionId);
 
-      assert.equal(t2.action, 'collect_info');
-      assert.equal(t2.appointment, undefined);
-      assert.match(t2.message.content, /already booked/i);
-      assert.equal(t2.bookingDraft.time, null, 'the dead time is dropped so it is not proposed again');
-      assert.equal(t2.bookingDraft.date, date);
-      assert.equal(t2.bookingDraft.serviceName, 'Routine Checkup');
-      assert.deepEqual(t2.missing, ['time']);
+      assertRefusedBeforeSummary(t1);
+      assert.match(t1.message.content, /already booked/i);
+      assert.equal(t1.bookingDraft.time, null, 'the dead time is dropped so it is not proposed again');
+      assert.equal(t1.bookingDraft.date, date);
+      assert.equal(t1.bookingDraft.serviceName, 'Routine Checkup');
+      assert.deepEqual(t1.missing, ['time']);
 
-      const suggestions = t2.suggestions!;
+      const suggestions = t1.suggestions!;
       assert.equal(suggestions.length, 3);
       assert.deepEqual(
         suggestions.slice(0, 2).map((s) => s.time),
@@ -214,7 +223,7 @@ describe('chat', () => {
         assert.equal(s.date, date);
         assert.notEqual(s.time, '10:00');
         assert.match(s.label, /^\d{1,2}:\d{2} (AM|PM)$/);
-        assert.ok(t2.message.content.includes(s.label), `the reply names ${s.label}`);
+        assert.ok(t1.message.content.includes(s.label), `the reply names ${s.label}`);
       }
       // Every suggestion really is free.
       const free = await customer.get<{ availability: { slots: { time: string; available: boolean }[] } }>(
@@ -225,11 +234,25 @@ describe('chat', () => {
       }
 
       // The user picks one of them and the conversation carries on.
-      const t3 = await turn(customer, '9:30am', t1.sessionId);
-      assert.equal(t3.action, 'confirm');
-      const t4 = await turn(customer, 'yes', t1.sessionId);
-      assert.equal(t4.action, 'booked');
-      assert.equal(t4.appointment!.startsAt, instant(date, '09:30'));
+      const t2 = await turn(customer, '9:30am', t1.sessionId);
+      assert.equal(t2.action, 'confirm');
+      const t3 = await turn(customer, 'yes', t1.sessionId);
+      assert.equal(t3.action, 'booked');
+      assert.equal(t3.appointment!.startsAt, instant(date, '09:30'));
+    });
+
+    it('still checks on "yes": a slot taken after the summary was shown is refused, not double-booked', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      assert.equal(t1.action, 'confirm');
+      assert.equal((await book(staff, { date, time: '10:00' })).status, 201);
+
+      const t2 = await turn(customer, 'yes', t1.sessionId);
+      assert.equal(t2.action, 'collect_info');
+      assert.match(t2.message.content, /already booked/i);
+      assert.equal(t2.suggestions!.length, 3);
+      assert.equal(t2.bookingDraft.time, null);
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
     });
 
     it('refuses a time that clashes with the customer’s own booking, and offers times they are free', async () => {
@@ -238,14 +261,11 @@ describe('chat', () => {
       assert.equal((await book(customer, { date, time: '10:00', serviceId: SEED.services.teethWhitening.id })).status, 201);
 
       const t1 = await turn(customer, `routine checkup on ${date} at 10:30am`);
-      assert.equal(t1.action, 'confirm');
-      const t2 = await turn(customer, 'yes', t1.sessionId);
 
-      assert.equal(t2.action, 'collect_info');
-      assert.match(t2.message.content, /already have an appointment at that time/i);
-      assert.equal(t2.bookingDraft.time, null);
-      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
-      const offered = t2.suggestions!.map((s) => s.time);
+      assertRefusedBeforeSummary(t1);
+      assert.match(t1.message.content, /already have an appointment at that time/i);
+      assert.equal(t1.bookingDraft.time, null);
+      const offered = t1.suggestions!.map((s) => s.time);
       assert.ok(offered.length > 0);
       for (const time of ['10:00', '10:30']) {
         assert.ok(!offered.includes(time), `${time} overlaps the customer's own booking and must not be offered`);
@@ -255,14 +275,11 @@ describe('chat', () => {
     it('refuses a time off the half-hour grid and offers the nearest ones on it', async () => {
       const date = freshDate();
       const t1 = await turn(customer, `routine checkup on ${date} at 2:10pm`);
-      assert.equal(t1.bookingDraft.time, '14:10');
-      const t2 = await turn(customer, 'yes', t1.sessionId);
 
-      assert.equal(t2.action, 'collect_info');
-      assert.match(t2.message.content, /on the hour or half hour/);
-      assert.equal(t2.bookingDraft.time, null);
-      assert.deepEqual(t2.suggestions!.slice(0, 2).map((s) => s.time), ['14:00', '14:30']);
-      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+      assertRefusedBeforeSummary(t1);
+      assert.match(t1.message.content, /on the hour or half hour/);
+      assert.equal(t1.bookingDraft.time, null);
+      assert.deepEqual(t1.suggestions!.slice(0, 2).map((s) => s.time), ['14:00', '14:30']);
     });
 
     it('rolls suggestions over to the next day when the whole day is gone', async () => {
@@ -275,26 +292,51 @@ describe('chat', () => {
         }
       }
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
-      const t2 = await turn(customer, 'yes', t1.sessionId);
-      assert.equal(t2.action, 'collect_info');
-      assert.ok(t2.suggestions!.length > 0);
-      assert.ok(t2.suggestions!.every((s) => s.date > date));
-      assert.match(t2.suggestions![0]!.label, /^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM)$/, 'a different day is named in the label');
+      assertRefusedBeforeSummary(t1);
+      assert.ok(t1.suggestions!.length > 0);
+      assert.ok(t1.suggestions!.every((s) => s.date > date));
+      assert.match(t1.suggestions![0]!.label, /^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}, \d{1,2}:\d{2} (AM|PM)$/, 'a different day is named in the label');
     });
 
-    it('explains opening hours when the requested time is outside them', async () => {
-      const t1 = await turn(customer, `routine checkup on ${freshDate()} at 8pm`);
-      const t2 = await turn(customer, 'yes', t1.sessionId);
-      assert.equal(t2.action, 'collect_info');
-      assert.match(t2.message.content, /9:00 AM to 5:00 PM/);
-      assert.equal(t2.bookingDraft.time, null);
+    it('explains opening hours instead of summarising a time outside them, and keeps the day', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 4:30pm`);
+      assert.equal(t1.action, 'confirm', '4:30 PM starts inside opening hours');
+
+      const t2 = await turn(customer, 'make it 8pm instead', t1.sessionId);
+      assertRefusedBeforeSummary(t2);
+      assert.match(t2.message.content, /^We're open 9:00 AM to 5:00 PM\. Please choose a time inside those hours\. What other time would suit you\?$/);
+      assert.deepEqual(t2.bookingDraft, { serviceName: 'Routine Checkup', date, time: null, notes: null });
+
+      // The summary that was on screen is gone, so a "yes" now books nothing.
+      const t3 = await turn(customer, 'yes', t1.sessionId);
+      assert.notEqual(t3.action, 'booked');
       assert.deepEqual(await appointmentsFor(t1.sessionId), []);
     });
 
-    it('does not book a time that has already passed', async () => {
-      const t1 = await turn(customer, `routine checkup on ${futureDate(-2)} at 10am`);
+    it('does not summarise, or book, a time that has already passed', async () => {
+      const t1 = await turn(customer, `routine checkup on ${pastDate(2)} at 10am`);
+      assertRefusedBeforeSummary(t1);
+      assert.match(t1.message.content, /already passed/);
+      assert.equal(t1.bookingDraft.date, null, 'a past day is dropped with its time');
       const t2 = await turn(customer, 'yes', t1.sessionId);
       assert.notEqual(t2.action, 'booked');
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+    });
+
+    it('answers "Can you confirm the price first?" and shows the summary again, without booking', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `teeth whitening on ${date} at 11am`);
+      assert.equal(t1.action, 'confirm');
+      const t2 = await turn(customer, 'Can you confirm the price first?', t1.sessionId);
+
+      assert.equal(t2.action, 'confirm');
+      assert.match(t2.message.content, /^Teeth Whitening takes 60 minutes and costs \$240\.00\. Just to confirm: Teeth Whitening .* Shall I book it\?$/);
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+
+      const t3 = await turn(customer, 'yes, but make it 3pm', t1.sessionId);
+      assert.equal(t3.action, 'confirm', 'a change is shown again, not booked');
+      assert.equal(t3.bookingDraft.time, '15:00');
       assert.deepEqual(await appointmentsFor(t1.sessionId), []);
     });
 
@@ -313,6 +355,158 @@ describe('chat', () => {
       for (const r of replies.filter((r) => r.status !== 201)) assertApiError(r, 409, 'SESSION_CLOSED');
       assert.equal(replies.filter((r) => r.status === 201 && r.body.action === 'booked').length, 1);
       assert.equal((await appointmentsFor(t1.sessionId)).length, 1, 'the slot is held by exactly one appointment');
+    });
+
+    it('says nothing was booked on "Don’t book anything yet." and keeps the details for later', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      const t2 = await turn(customer, 'Don’t book anything yet.', t1.sessionId);
+      assert.equal(t2.action, 'confirm');
+      assert.match(t2.message.content, /^Okay, I haven't booked anything\. I've kept Routine Checkup on .* at 10:00 AM/);
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+
+      const t3 = await turn(customer, 'yes', t1.sessionId);
+      assert.equal(t3.action, 'booked', 'agreeing later needs nothing re-typed');
+    });
+
+    it('asks for the service, day and time on "I want an appointment."', async () => {
+      const t = await turn(customer, 'I want an appointment.');
+      assert.equal(t.action, 'collect_info');
+      assert.deepEqual(t.missing, ['serviceName', 'date', 'time']);
+      assert.match(t.message.content, /Which service would you like, and what day and time suit you\? We offer: /);
+    });
+
+    it('asks AM or PM for "At 5." rather than guess, and reopens a time already on screen', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      assert.equal(t1.action, 'confirm');
+
+      const t2 = await turn(customer, 'At 5.', t1.sessionId);
+      assert.equal(t2.action, 'collect_info');
+      assert.equal(t2.bookingDraft.time, null);
+      assert.match(t2.message.content, /Did you mean 5:00 AM or 5:00 PM\? We're open 9:00 AM to 5:00 PM/);
+
+      const t3 = await turn(customer, 'yes', t1.sessionId);
+      assert.notEqual(t3.action, 'booked', 'the 10:00 the user moved away from cannot be agreed to');
+      assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+
+      const t4 = await turn(customer, '3pm', t1.sessionId);
+      assert.equal(t4.action, 'confirm');
+      assert.equal(t4.bookingDraft.time, '15:00');
+    });
+
+    it('asks which date "03/04" means rather than guess', async () => {
+      const t = await turn(customer, 'routine checkup, book for 03/04');
+      assert.equal(t.bookingDraft.date, null);
+      assert.match(t.message.content, /Did you mean \w+, March 4, \d{4} or \w+, April 3, \d{4}\?/);
+    });
+
+    it('asks whether today’s weekday means today or a week today while both are open', async () => {
+      // The pinned clock reads 10:00 on `today`, so today still has times left.
+      const t = await turn(customer, `routine checkup on ${weekdayName(today)} at 2pm`);
+      assert.equal(t.action, 'collect_info');
+      assert.equal(t.bookingDraft.date, null);
+      assert.equal(t.bookingDraft.time, '14:00');
+      assert.match(t.message.content, new RegExp(`Did you mean ${weekdayName(today)}, .* or ${weekdayName(today)}, .*\\?`));
+    });
+
+    it('does not ask about today’s weekday when the business is closed that weekday: it names the closed day', async () => {
+      const isoWeekday = ((new Date(`${today}T12:00:00Z`).getUTCDay() + 6) % 7) + 1;
+      await app.db.query('UPDATE businesses SET open_days = $2 WHERE id = $1', [
+        SEED.bluewave.id,
+        [1, 2, 3, 4, 5, 6, 7].filter((d) => d !== isoWeekday),
+      ]);
+      try {
+        const t = await turn(customer, `routine checkup on ${weekdayName(today)} at 2pm`);
+        assert.doesNotMatch(t.message.content, /Did you mean/);
+        assert.equal(t.action, 'collect_info');
+        assert.match(t.message.content, new RegExp(`^We're closed on ${weekdayName(today)}s\\.`));
+        assert.equal(t.bookingDraft.date, null);
+      } finally {
+        await app.db.query('UPDATE businesses SET open_days = $2 WHERE id = $1', [SEED.bluewave.id, [1, 2, 3, 4, 5, 6, 7]]);
+      }
+    });
+
+    it('takes rapid messages one at a time, in order, without one undoing another', async () => {
+      const t1 = await turn(customer, 'hello');
+      const date = freshDate();
+      // Sent together, each fills a different detail. Run concurrently, every
+      // turn would start from the empty draft and the last write would win.
+      const replies = await Promise.all(
+        ['a routine checkup', `on ${date}`, 'at 10am'].map((text) => say(customer, text, t1.sessionId)),
+      );
+      for (const r of replies) assert.equal(r.status, 201);
+
+      const { body } = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+      assert.deepEqual(body.session.bookingDraft, { serviceName: 'Routine Checkup', date, time: '10:00', notes: null });
+      assert.deepEqual(
+        body.messages.map((m) => m.role),
+        ['user', 'assistant', 'user', 'assistant', 'user', 'assistant', 'user', 'assistant'],
+        'each reply directly follows the message it answers',
+      );
+      // Arrival order is the order the turns ran in: each saw the previous one's draft.
+      const drafts = replies.map((r) => r.body.bookingDraft);
+      const filled = drafts.map((d) => [d.serviceName, d.date, d.time].filter(Boolean).length).sort();
+      assert.deepEqual(filled, [1, 2, 3]);
+    });
+
+    it('books once per conversation when chat "yes", the booking form and the draft form race (20 rounds)', async () => {
+      for (let round = 0; round < 20; round += 1) {
+        const date = freshDate();
+        const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+        assert.equal(t1.action, 'confirm');
+
+        // Different times, so no slot or customer overlap decides the race:
+        // only the one-booking-per-conversation rule can.
+        const replies = await Promise.all([
+          say(customer, 'yes', t1.sessionId),
+          book(customer, { date, time: '12:00', chatSessionId: t1.sessionId }),
+          customer.post<AssistantTurnDto>('/api/chat/draft', {
+            sessionId: t1.sessionId,
+            slots: { serviceName: 'Routine Checkup', date, time: '14:00' },
+          }),
+        ]);
+
+        const live = (
+          await app.db.query(`SELECT id FROM appointments WHERE chat_session_id = $1 AND status IN ('pending', 'confirmed')`, [
+            t1.sessionId,
+          ])
+        ).rows;
+        assert.equal(live.length, 1, `round ${round}: exactly one live appointment for the conversation`);
+        assert.equal(replies.filter((r) => r.status === 201 && ('appointment' in r.body)).length, 1, `round ${round}: one winner`);
+        for (const r of replies.filter((r) => r.status !== 201)) assertApiError(r, 409, 'SESSION_CLOSED');
+        const { body } = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+        assert.equal(body.session.status, 'completed');
+      }
+    });
+
+    it('refuses a form booking that names a conversation which has already booked', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      assert.equal((await turn(customer, 'yes', t1.sessionId)).action, 'booked');
+      assertApiError(await book(customer, { date, time: '15:00', chatSessionId: t1.sessionId }), 409, 'SESSION_CLOSED');
+      assert.equal((await appointmentsFor(t1.sessionId)).length, 1);
+    });
+
+    it('refuses a day the business is closed before summarising it, forgets that day, and asks for another', async () => {
+      const date = freshDate();
+      const isoWeekday = ((new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7) + 1;
+      await app.db.query('UPDATE businesses SET open_days = $2 WHERE id = $1', [
+        SEED.bluewave.id,
+        [1, 2, 3, 4, 5, 6, 7].filter((d) => d !== isoWeekday),
+      ]);
+      try {
+        const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+        assertRefusedBeforeSummary(t1);
+        assert.match(t1.message.content, /We're closed on \w+s\./);
+        assert.ok(t1.suggestions?.length, 'open days are offered instead');
+        assert.equal(t1.bookingDraft.date, null, 'the closed day is not retried on the next turn');
+        assert.equal(t1.bookingDraft.time, null);
+        assert.equal(t1.bookingDraft.serviceName, 'Routine Checkup');
+        assert.deepEqual(await appointmentsFor(t1.sessionId), []);
+      } finally {
+        await app.db.query('UPDATE businesses SET open_days = $2 WHERE id = $1', [SEED.bluewave.id, [1, 2, 3, 4, 5, 6, 7]]);
+      }
     });
 
     it('closes the conversation once it has booked, so a stray "yes" cannot book again', async () => {
@@ -377,15 +571,18 @@ describe('chat', () => {
       assert.equal((await book(staff, { date, time: '10:00' })).status, 201);
       let sessionId: string | undefined;
       const turns: AssistantTurnDto[] = [];
-      for (const text of ['I need a routine checkup', `on ${date}`, 'at 10am', 'yes', 'hmm']) {
+      // Three turns still missing the time, then a taken time: the fourth turn
+      // would count as stalled, but it offers times to pick from.
+      for (const text of [`I need a routine checkup on ${date}`, 'hmm', 'not sure', 'at 10am']) {
         const t = await turn(customer, text, sessionId);
         sessionId = t.sessionId;
         turns.push(t);
       }
       assert.deepEqual(
         turns.map((t) => t.action),
-        ['collect_info', 'collect_info', 'confirm', 'collect_info', 'collect_info'],
+        ['collect_info', 'collect_info', 'collect_info', 'collect_info'],
       );
+      assert.deepEqual(turns.map((t) => t.missing), [['time'], ['time'], ['time'], ['time']]);
       assert.ok(turns[3]!.suggestions?.length, 'the fourth turn offered times to pick from');
       assert.doesNotMatch(turns[3]!.message.content, /booking form/i);
     });
@@ -544,7 +741,7 @@ describe('chat', () => {
 
       const past = await draft(customer, {
         sessionId: session.id,
-        slots: { serviceName: 'Routine Checkup', date: futureDate(-3), time: '10:00' },
+        slots: { serviceName: 'Routine Checkup', date: pastDate(3), time: '10:00' },
       });
       assert.equal(past.body.action, 'collect_info');
       assert.deepEqual(await appointmentsFor(session.id), []);
@@ -686,8 +883,8 @@ describe('chat', () => {
 
     it('restores each assistant message’s action and suggestions after a reload', async () => {
       const date = freshDate();
-      assert.equal((await book(staff, { date, time: '10:00' })).status, 201);
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      assert.equal((await book(staff, { date, time: '10:00' })).status, 201);
       const t2 = await turn(customer, 'yes', t1.sessionId);
       assert.ok(t2.suggestions?.length);
 
@@ -754,7 +951,8 @@ describe('chat', () => {
       const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
       const t2 = await turn(customer, 'yes', t1.sessionId);
       const other = await book(staff, { date: freshDate(), time: '15:00' });
-      await app.db.query('UPDATE appointments SET chat_session_id = $1 WHERE id = $2', [
+      // Finished, as a live one could not share the conversation (migration 009).
+      await app.db.query(`UPDATE appointments SET chat_session_id = $1, status = 'completed' WHERE id = $2`, [
         t1.sessionId,
         other.body.appointment.id,
       ]);

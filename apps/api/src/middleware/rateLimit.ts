@@ -20,6 +20,12 @@ import { getRequestId } from './requestContext.js';
  * correct across replicas — see "Known limitations" in the README. The fix is a
  * Redis store, which is a config change here rather than a redesign.
  */
+/** 45 -> "45 seconds", 897 -> "15 minutes": a login lockout read in seconds is hard to act on. */
+function waitFor(seconds: number): string {
+  if (seconds < 90) return `${seconds} second${seconds === 1 ? '' : 's'}`;
+  return `${Math.ceil(seconds / 60)} minutes`;
+}
+
 function makeLimiter(opts: Partial<Options> & { windowMs: number; limit: number }): RequestHandler {
   const limiter = rateLimit({
     standardHeaders: 'draft-7', // RateLimit-* headers, so clients can self-throttle
@@ -30,9 +36,7 @@ function makeLimiter(opts: Partial<Options> & { windowMs: number; limit: number 
       res.status(429).json({
         error: {
           code: ERROR_CODES.RATE_LIMITED,
-          message: retryAfter
-            ? `Too many requests. Try again in ${retryAfter} second${retryAfter === 1 ? '' : 's'}.`
-            : 'Too many requests. Please slow down.',
+          message: retryAfter ? `Too many requests. Try again in ${waitFor(retryAfter)}.` : 'Too many requests. Please slow down.',
           requestId: getRequestId(req),
         },
       });

@@ -16,10 +16,14 @@ export function useAppointments(filters: AppointmentFilters = {}) {
  * cache that can show it. On a slot conflict the availability grid is
  * refetched, so the picker immediately shows what is actually free now.
  */
+/** What the booking form submits: the request body, plus the key naming this booking attempt. */
+export type CreateAppointmentVariables = CreateAppointmentRequest & { idempotencyKey?: string };
+
 export function useCreateAppointment() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input: CreateAppointmentRequest) => appointmentsApi.create(input),
+    mutationFn: ({ idempotencyKey, ...input }: CreateAppointmentVariables) =>
+      appointmentsApi.create(input, idempotencyKey ? { idempotencyKey } : undefined),
     onSuccess: (appointment) => upsertAppointmentInCaches(queryClient, appointment),
     onError: (error, input) => {
       if (hasErrorCode(error, ERROR_CODES.SLOT_UNAVAILABLE)) {

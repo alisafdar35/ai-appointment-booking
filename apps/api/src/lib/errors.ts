@@ -46,8 +46,8 @@ export const forbidden = (message = 'You do not have access to this resource') =
 export const notFound = (what = 'Resource') =>
   new AppError(404, ERROR_CODES.NOT_FOUND, `${what} not found`);
 
-export const emailTaken = () =>
-  new AppError(409, ERROR_CODES.EMAIL_TAKEN, 'An account with this email already exists');
+export const emailTaken = (message = 'An account with this email already exists') =>
+  new AppError(409, ERROR_CODES.EMAIL_TAKEN, message);
 
 export const slotUnavailable = (message = 'That time slot is already booked') =>
   new AppError(409, ERROR_CODES.SLOT_UNAVAILABLE, message);
@@ -63,6 +63,13 @@ export const appointmentInPast = () =>
 
 export const appointmentNotCancellable = (status: string) =>
   new AppError(409, ERROR_CODES.APPOINTMENT_NOT_CANCELLABLE, `This appointment is already ${status}.`);
+
+export const idempotencyKeyReused = () =>
+  new AppError(
+    422,
+    ERROR_CODES.IDEMPOTENCY_KEY_REUSED,
+    'This Idempotency-Key was already used for a different booking. Send a new key for new details.',
+  );
 
 export const sessionClosed = () =>
   new AppError(
@@ -100,3 +107,6 @@ export const OVERLAP_CONSTRAINTS = {
   SLOT: 'appointments_no_overlap',
   CUSTOMER: 'appointments_customer_no_overlap',
 } as const;
+
+/** The unique index (migration 009) allowing one live appointment per conversation. */
+export const CHAT_SESSION_BOOKING_INDEX = 'appointments_one_live_per_chat_session';

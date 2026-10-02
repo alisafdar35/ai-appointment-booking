@@ -6,7 +6,7 @@ import {
   nowTimeInZone,
   shortDate,
   todayInZone,
-  zonedNow,
+  wallClock,
 } from '../../src/lib/time.js';
 
 /**
@@ -59,10 +59,10 @@ describe('nowTimeInZone', () => {
   });
 });
 
-describe('zonedNow', () => {
-  it('carries the business wall-clock fields as local fields', () => {
+describe('wallClock', () => {
+  it('carries the given wall-clock fields as local fields', () => {
     // The chrono date parser reads local getters, so these must be the business's.
-    const reference = zonedNow('Asia/Tokyo', new Date('2026-10-09T20:15:30Z'));
+    const reference = wallClock('2026-10-10', '05:15');
     assert.equal(reference.getFullYear(), 2026);
     assert.equal(reference.getMonth(), 9);
     assert.equal(reference.getDate(), 10);

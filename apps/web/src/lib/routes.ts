@@ -34,8 +34,15 @@ export function safeNextPath(raw: string | null | undefined, fallback: string = 
   }
 }
 
-/** /login, remembering where the user was headed. */
-export function loginHref(next?: string): string {
+/** Set on /login when the user was sent there because their session ended, so the page can say why. */
+export const SESSION_EXPIRED_PARAM = 'expired';
+
+/** /login, remembering where the user was headed and, optionally, that their session had ended. */
+export function loginHref(next?: string, { expired = false }: { expired?: boolean } = {}): string {
   const target = next ? safeNextPath(next, '') : '';
-  return target ? `${ROUTES.login}?next=${encodeURIComponent(target)}` : ROUTES.login;
+  const params = new URLSearchParams();
+  if (target) params.set('next', target);
+  if (expired) params.set(SESSION_EXPIRED_PARAM, '1');
+  const query = params.toString();
+  return query ? `${ROUTES.login}?${query}` : ROUTES.login;
 }

@@ -20,7 +20,7 @@ Base URL is the API origin (`http://localhost:4000` locally). Through the web ap
 | chat | 20 / 1 min | user | `POST /chat/messages` |
 | write | 40 / 1 min | user | `POST /appointments`, `POST /appointments/:id/cancel`, `POST /chat/sessions`, `POST /chat/draft` |
 
-The store is in-memory, per process. `RATE_LIMIT_DISABLED=true` turns all limiters off.
+The store is in-memory, per process. `RATE_LIMIT_DISABLED=true` turns all limiters off. The 429 message states the wait ("Try again in 15 minutes." for a login lockout, seconds below 90 s).
 
 ## Errors
 
@@ -37,20 +37,21 @@ The store is in-memory, per process. `RATE_LIMIT_DISABLED=true` turns all limite
 
 | Code | Status | Meaning |
 |---|---|---|
-| `VALIDATION_FAILED` | 400 | Schema failure (`details` keyed by field path), malformed JSON, impossible date, a start time off the 30-minute grid (`details.time`) |
+| `VALIDATION_FAILED` | 400 | Schema failure (`details` keyed by field path), malformed JSON, impossible date, a start time off the 30-minute grid or skipped by a DST spring-forward (`details.time`), a malformed `Idempotency-Key` (`details["Idempotency-Key"]`) |
 | `UNAUTHENTICATED` | 401 | No, invalid or expired access token; dead refresh token |
-| `SESSION_SUPERSEDED` | 401 | The refresh token was rotated by another tab less than 15 s ago. Retry; do not sign out |
+| `SESSION_SUPERSEDED` | 401 | The refresh token was rotated less than 15 s ago and its successor is already in use (another tab won). Retry; do not sign out |
 | `INVALID_CREDENTIALS` | 401 | Wrong email or password. Deliberately the same for both |
 | `FORBIDDEN` | 403 | Foreign `Origin` on a write; a role that may not call the endpoint (`GET /api/ai/summary` is owner-only) |
 | `NOT_FOUND` | 404 | Unknown route or resource, or one belonging to another user or tenant |
-| `EMAIL_TAKEN` | 409 | Email already registered in that business |
+| `EMAIL_TAKEN` | 409 | Email already registered in that business, or (creating a workspace) the email already owns one |
 | `SLOT_UNAVAILABLE` | 409 | Overlaps a live appointment for the same service (pre-check or EXCLUDE constraint) |
 | `CUSTOMER_BUSY` | 409 | The caller already holds another live appointment overlapping that time (pre-check or `appointments_customer_no_overlap`) |
 | `APPOINTMENT_NOT_CANCELLABLE` | 409 | Already cancelled or completed |
 | `SESSION_CLOSED` | 409 | The conversation already booked; start a new one |
 | `CONFLICT` | 409 | Any other unique-constraint violation (well-formed input that collides with an existing value) |
 | `PAYLOAD_TOO_LARGE` | 413 | Body over 100 kb |
-| `OUTSIDE_BUSINESS_HOURS` | 422 | The whole appointment must fit inside opening hours |
+| `OUTSIDE_BUSINESS_HOURS` | 422 | The whole appointment must fit inside opening hours, on a day the business opens |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | The `Idempotency-Key` was already used by this user for a different booking |
 | `APPOINTMENT_IN_PAST` | 422 | Start time already passed (business clock) |
 | `RATE_LIMITED` | 429 | See tiers above |
 | `INTERNAL` | 500 | Unexpected. Outside production the body adds `debug` with the message |
@@ -111,6 +112,8 @@ Creates a business and makes you its **owner** (if `businessSlug` is omitted), o
 **201** `{ user: UserDto, accessToken, expiresInSeconds }` and both auth cookies.
 Errors: 400 (including `details.businessSlug` for an unknown code), 409 `EMAIL_TAKEN`, 429.
 
+Duplicates: an email is unique per business, compared case-insensitively (it is lower-cased first). Creating a workspace is also refused with `EMAIL_TAKEN` when the email already owns one, so a resubmitted owner signup never creates a second business; concurrent submissions are serialised and exactly one wins ([ADR-022](decisions.md#adr-022-one-workspace-per-owner-email)). Unknown body fields (`role`, `businessId`, ...) are ignored.
+
 ```bash
 curl -i -c jar.txt -X POST http://localhost:4000/api/auth/signup \
   -H 'Content-Type: application/json' \
@@ -134,6 +137,8 @@ TOKEN=$(curl -s -c jar.txt -X POST http://localhost:4000/api/auth/login \
 Authenticated by the `appt_refresh` cookie alone. It rotates the token: the old one is single-use.
 **200** `{ user, accessToken, expiresInSeconds }` and new cookies.
 Errors: 401 `UNAUTHENTICATED` (cookies cleared; also returned after a replayed token, in which case all the user's sessions are revoked), 401 `SESSION_SUPERSEDED` (cookies left in place).
+
+A token rotated less than 15 s ago whose successor was never used (the response carrying it was lost, e.g. a timeout during a cold start) is an **abandoned rotation**: the unused successor is revoked and a fresh pair is returned with `200` and new cookies.
 
 ```bash
 curl -s -b jar.txt -c jar.txt -X POST http://localhost:4000/api/auth/refresh
@@ -164,9 +169,9 @@ curl -s http://localhost:4000/api/auth/me -H "Authorization: Bearer $TOKEN"
 
 ### `GET /api/services/:serviceId/availability?date=YYYY-MM-DD`
 
-A 30-minute grid of start times inside opening hours, for one day in the business timezone. A slot is `available: false` if it is in the past, overlaps a live appointment for that service, or overlaps one of the caller's own live appointments (on any service). The form's slot picker and the chat's suggestions use the same query.
+A 30-minute grid of start times inside opening hours, for one day in the business timezone. A slot is `available: false` if it is in the past, overlaps a live appointment for that service, or overlaps one of the caller's own live appointments (on any service). On a weekday the business does not open (`businesses.open_days`) the grid is empty and `closed` is `true`. Wall times skipped by a DST spring-forward are left out; a repeated fall-back time appears once. The form's slot picker and the chat's suggestions use the same query.
 
-**200** `{ availability: { date, serviceId, durationMinutes, slots: [{ time: "09:00", available: true }, ...] } }`.
+**200** `{ availability: { date, serviceId, durationMinutes, closed, slots: [{ time: "09:00", available: true }, ...] } }`.
 Errors: 400 (bad uuid, or an impossible date such as `2026-02-31`), 404 service not in the tenant.
 
 ```bash
@@ -209,11 +214,31 @@ curl -s "http://localhost:4000/api/appointments?window=upcoming&status=pending,c
 | `source` | `form` (default) · `chat`. `admin` exists in the database enum for display only and is rejected (400) from clients |
 
 **201** `{ appointment }`, created `confirmed`, with `ends_at` derived from the service duration. Emits `appointment:created`.
-Errors: 400 (including an off-grid time), 404 (service/conversation), 409 `SLOT_UNAVAILABLE` / `CUSTOMER_BUSY`, 422 `OUTSIDE_BUSINESS_HOURS` / `APPOINTMENT_IN_PAST`, 429.
+Errors: 400 (including an off-grid time, or one DST skips), 404 (service/conversation), 409 `SLOT_UNAVAILABLE` / `CUSTOMER_BUSY`, 409 `SESSION_CLOSED` (the `chatSessionId` conversation has already booked: one booking per conversation, enforced under a row lock), 422 `OUTSIDE_BUSINESS_HOURS` / `APPOINTMENT_IN_PAST` / `IDEMPOTENCY_KEY_REUSED`, 429.
+
+Rules, all checked again at the moment of booking whatever the picker showed when the form loaded:
+
+- **Who and where** come from the access token. `userId`, `customerId`, `businessId`, `status` and any other unknown body field are ignored.
+- **Time** is a wall-clock time in the **business** timezone, whatever the client's zone. It must be in the future on the business clock, on a weekday in `open_days`, on the 30-minute grid, and the whole appointment must end by closing time.
+- **DST.** A time a spring-forward skips (02:30 on a US transition day) does not exist and is refused with `details.time`. A time a fall-back repeats (01:30) is booked as its second, standard-time occurrence ([ADR-021](decisions.md#adr-021-closed-weekdays-are-a-column-with-an-every-day-default-dst-gaps-are-refused)).
+- **Overlaps** with another live booking of the service, or with any of the caller's own, are 409, decided by EXCLUDE constraints under concurrency: of simultaneous requests for one slot exactly one succeeds.
+- A database failure at any point, the final COMMIT included, is a `500 INTERNAL` with nothing stored; a 201 is only sent after the commit.
+
+**`Idempotency-Key` (optional, recommended).** Send a fresh key per booking attempt (1–255 printable ASCII characters with no spaces; a UUID is ideal) and the *same* key on every retry of that attempt:
+
+| Request | Response |
+|---|---|
+| First use of the key | Normal handling. On 201, the key and the response body are stored with the booking, in one transaction |
+| Same key, same booking details (after validation, so key order or a blank `notes` do not matter) | **201** with the original body byte for byte, and header `Idempotent-Replayed: true`. No second booking, no socket event |
+| Same key, different details | **422** `IDEMPOTENCY_KEY_REUSED` |
+| Same key while the first request is still running | Waits for it, then replays its result (or, if it failed, is handled as a first use) |
+| After a refusal (409/422) or a failure (500) | Nothing was stored; retrying with the same key is a first use |
+
+Keys are per user (two users may use the same string) and honoured for 24 hours. Without the header, a repeated request is not booked twice either (the slot or the customer is busy, so it is a 409), but the client cannot tell its own earlier success from someone else's.
 
 ```bash
 curl -s -X POST http://localhost:4000/api/appointments -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
   -d '{"serviceId":"cccccccc-0000-0000-0000-000000000001","date":"2026-10-07","time":"10:30","notes":"First visit"}'
 ```
 
@@ -224,7 +249,7 @@ curl -s -X POST http://localhost:4000/api/appointments -H "Authorization: Bearer
 ### `POST /api/appointments/:id/cancel` · write tier
 
 `{ reason?: string (≤500) }`. This is a named state transition, not a PATCH of `status`. **200** `{ appointment }`. Emits `appointment:updated` to the customer and to the business's staff and owners.
-Errors: 404, 409 `APPOINTMENT_NOT_CANCELLABLE`.
+Errors: 404, 409 `APPOINTMENT_NOT_CANCELLABLE`. Cancelling twice is safe: the second call changes nothing and answers 409 `APPOINTMENT_NOT_CANCELLABLE` ("This appointment is already cancelled."). Rescheduling is not implemented: cancel and book again.
 
 ```bash
 curl -s -X POST http://localhost:4000/api/appointments/<id>/cancel -H "Authorization: Bearer $TOKEN" \
@@ -274,7 +299,7 @@ Starts an empty conversation titled "New conversation"; the first message sent i
 ```
 
 `action` is one of `collect_info` · `confirm` · `booked` (with `appointment`) · `needs_form`. `suggestions: [{ date, time, label }]` is present when the requested slot was refused. (`error` exists in the shared type but the server never sends it.)
-Errors: 400, 404 (session), 409 `SESSION_CLOSED` (the message is **not** stored), 429. Provider failures are never errors.
+Errors: 400, 404 (session), 409 `SESSION_CLOSED` (the message is **not** stored, unless the conversation was closed by a concurrent booking while this turn was in progress), 429. Provider failures are never errors.
 Side effects: `assistant:typing` (true, then false), `assistant:turn`, and `appointment:created` when it books.
 
 ```bash

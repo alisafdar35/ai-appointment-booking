@@ -2,10 +2,12 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AppointmentDto, AvailabilityDto, UserDto } from '@appt/shared';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock, type MockInstance } from 'vitest';
-import { ApiError, appointmentsApi, servicesApi } from '@/lib/api';
+import { ApiError, apiRequest, appointmentsApi, servicesApi } from '@/lib/api';
 import { queryKeys } from '@/lib/queries';
 import { BookingDialog } from './BookingDialog';
 import { CHECKUP, WHITENING, makeAppointment, renderWithProviders } from './test-support';
+
+const SAVED_DRAFT_KEY = 'slotly.interrupted.booking-dialog';
 
 vi.mock('@/providers/AuthProvider', () => ({
   useBusinessTimezone: () => 'America/New_York',
@@ -18,6 +20,7 @@ const grid = (serviceId: string): AvailabilityDto => ({
   date: DATE,
   serviceId,
   durationMinutes: serviceId === CHECKUP.id ? 30 : 60,
+  closed: false,
   slots: [
     { time: '09:00', available: true },
     { time: '09:30', available: false },
@@ -124,13 +127,10 @@ describe('BookingDialog', () => {
     await submit();
 
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
-    expect(create).toHaveBeenCalledWith({
-      serviceId: CHECKUP.id,
-      date: DATE,
-      time: '14:00',
-      notes: 'Bring my x-rays',
-      source: 'form',
-    });
+    expect(create).toHaveBeenCalledWith(
+      { serviceId: CHECKUP.id, date: DATE, time: '14:00', notes: 'Bring my x-rays', source: 'form' },
+      { idempotencyKey: expect.stringMatching(/^[0-9a-f-]{36}$/) },
+    );
     expect(await screen.findByText('Routine Checkup booked')).toBeInTheDocument();
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(onBooked).toHaveBeenCalledWith(booked);
@@ -157,6 +157,89 @@ describe('BookingDialog', () => {
     await userEvent.click(button);
     fireEvent.submit(button.closest('form') ?? button);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('blocks a double click: two clicks before React re-renders still make one request', async () => {
+    const create = vi.spyOn(appointmentsApi, 'create').mockReturnValue(new Promise(() => {}));
+    open();
+    await fillBooking();
+
+    const button = screen.getByRole('button', { name: 'Book appointment' });
+    // Synchronous, back to back: no render happens between them.
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(create).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('names each booking attempt with an idempotency key, reused when the same booking is retried', async () => {
+    const create = vi
+      .spyOn(appointmentsApi, 'create')
+      .mockRejectedValueOnce(new ApiError({ status: 0, code: 'NETWORK', message: "Can't reach the server." }))
+      .mockRejectedValueOnce(new ApiError({ status: 0, code: 'NETWORK', message: "Can't reach the server." }))
+      .mockResolvedValue(makeAppointment());
+    open();
+    await fillBooking();
+
+    await submit();
+    await screen.findByText("Can't reach the server.");
+    await submit(); // Retry: the same booking
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    await userEvent.type(screen.getByLabelText('Notes (optional)'), 'Changed my mind');
+    await submit(); // A different booking now
+
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(3));
+    const keys = create.mock.calls.map(([, options]) => options?.idempotencyKey);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
+  describe('when the session ends while the form is open', () => {
+    afterEach(() => window.sessionStorage.clear());
+
+    it('keeps what was entered, for this user, so signing in again brings it back', async () => {
+      vi.spyOn(appointmentsApi, 'create').mockImplementation(() =>
+        apiRequest('/appointments', { method: 'POST', body: {} }),
+      );
+      // Access token expired, and the refresh is refused: the session is over.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          new Response(JSON.stringify({ error: { code: 'UNAUTHENTICATED', message: 'Sign in' } }), { status: 401 }),
+        ),
+      );
+      open();
+      await fillBooking();
+      await userEvent.type(screen.getByLabelText('Notes (optional)'), 'Lower left molar');
+      await submit();
+
+      await waitFor(() => expect(window.sessionStorage.getItem(SAVED_DRAFT_KEY)).not.toBeNull());
+      const saved = JSON.parse(window.sessionStorage.getItem(SAVED_DRAFT_KEY)!);
+      expect(saved).toMatchObject({
+        userId: 'u1',
+        values: { serviceId: CHECKUP.id, date: DATE, time: '14:00', notes: 'Lower left molar' },
+      });
+      vi.unstubAllGlobals();
+    });
+
+    it('starts from the kept values, and says why', async () => {
+      renderWithProviders(
+        <BookingDialog
+          open
+          onOpenChange={onOpenChange}
+          onBooked={onBooked}
+          restored={{ serviceId: CHECKUP.id, date: DATE, time: '14:00', notes: 'Lower left molar', source: 'form' }}
+        />,
+      );
+      expect(await screen.findByText('We kept your details')).toBeInTheDocument();
+      expect(await screen.findByRole('radio', { name: /Routine Checkup/ })).toBeChecked();
+      expect(screen.getByLabelText(/^Date/)).toHaveValue(DATE);
+      expect(await screen.findByRole('radio', { name: '2:00 PM' })).toBeChecked();
+      expect(screen.getByLabelText('Notes (optional)')).toHaveValue('Lower left molar');
+    });
   });
 
   it('on a taken slot: says so, clears the time and refetches the grid', async () => {
@@ -233,6 +316,25 @@ describe('BookingDialog', () => {
 
     const alert = await screen.findByText(expected);
     expect(alert.closest('[role="alert"]')).toHaveTextContent("We couldn't book that appointment");
+  });
+
+  it('puts a time the clocks skip (DST) on the time field, keeping the rest of the form', async () => {
+    vi.spyOn(appointmentsApi, 'create').mockRejectedValue(
+      new ApiError({
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        message: 'Invalid request',
+        details: { time: ['2:00 AM does not exist on that day: the clocks go forward.'] },
+      }),
+    );
+    open();
+    await fillBooking();
+    await submit();
+
+    const message = await screen.findByText('2:00 AM does not exist on that day: the clocks go forward.');
+    expect(message.closest('[role="alert"]')).toBeInTheDocument();
+    expect(screen.queryByText("We couldn't book that appointment")).not.toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /Routine Checkup/ })).toBeChecked();
   });
 
   it('offers a retry when the services cannot be loaded', async () => {

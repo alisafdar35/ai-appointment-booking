@@ -5,6 +5,7 @@ import { useEffect, type ReactNode } from 'react';
 import { safeNextPath } from '@/lib/routes';
 import { useAuth } from '@/providers/AuthProvider';
 import { CenteredLoader } from './AppShellSkeleton';
+import { SessionRestoreNotice } from './SessionRestoreNotice';
 
 /**
  * Wrap pages that only make sense signed out (/login, /signup). A signed-in
@@ -21,6 +22,6 @@ export function GuestGuard({ children }: { children: ReactNode }) {
     router.replace(safeNextPath(new URLSearchParams(window.location.search).get('next')));
   }, [status, router]);
 
-  if (status !== 'unauthenticated') return <CenteredLoader />;
+  if (status !== 'unauthenticated') return <CenteredLoader notice={<SessionRestoreNotice />} />;
   return <>{children}</>;
 }

@@ -63,11 +63,12 @@ SELECT business_id, user_id, 'cccccccc-0000-0000-0000-000000000001',
 FROM appointments WHERE id = 'ffffffff-0000-0000-0000-000000000001';
 ROLLBACK;
 
-\echo '=== 8. Every live appointment must sit inside its business''s opening hours, in its timezone (expect 0 rows) ==='
-SELECT a.id, a.starts_at AT TIME ZONE b.timezone AS local_start, b.opens_at, b.closes_at
+\echo '=== 8. Every live appointment must sit inside its business''s opening days and hours, in its timezone (expect 0 rows) ==='
+SELECT a.id, a.starts_at AT TIME ZONE b.timezone AS local_start, b.opens_at, b.closes_at, b.open_days
 FROM appointments a
 JOIN businesses b ON b.id = a.business_id
 WHERE a.status IN ('pending', 'confirmed')
-  AND ((a.starts_at AT TIME ZONE b.timezone)::time < b.opens_at
+  AND (NOT EXTRACT(ISODOW FROM a.starts_at AT TIME ZONE b.timezone)::smallint = ANY (b.open_days)
+    OR (a.starts_at AT TIME ZONE b.timezone)::time < b.opens_at
     OR (a.ends_at   AT TIME ZONE b.timezone)::time > b.closes_at
     OR (a.starts_at AT TIME ZONE b.timezone)::date <> (a.ends_at AT TIME ZONE b.timezone)::date);

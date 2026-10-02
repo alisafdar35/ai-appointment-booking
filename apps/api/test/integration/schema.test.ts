@@ -240,11 +240,16 @@ describe('schema constraints', () => {
 
     it('accepts a link to the user’s own tenant’s conversation, and no link at all', async () => {
       await inRollback(async () => {
+        // A conversation of its own: the seeded one already holds its one live booking.
+        const { rows } = await client.query<{ id: string }>(
+          'INSERT INTO chat_sessions (business_id, user_id) VALUES ($1, $2) RETURNING id',
+          [bluewave.id, users.customer.id],
+        );
         await client.query(
           `INSERT INTO appointments (business_id, user_id, service_id, starts_at, ends_at, status, chat_session_id)
            VALUES ($1, $2, $3, now() + interval '41 days', now() + interval '41 days 30 minutes', 'pending', $4),
                   ($1, $2, $3, now() + interval '42 days', now() + interval '42 days 30 minutes', 'pending', NULL)`,
-          [bluewave.id, users.customer.id, services.routineCheckup.id, SEEDED_SESSION],
+          [bluewave.id, users.customer.id, services.routineCheckup.id, rows[0]!.id],
         );
       });
     });
@@ -282,6 +287,36 @@ describe('schema constraints', () => {
     it('does not let a service that has bookings be deleted out from under them', async () => {
       const error = await refused('DELETE FROM services WHERE id = $1', [services.teethWhitening.id]);
       assert.equal(error.constraint, 'appointments_service_fk');
+    });
+  });
+
+  describe('one booking per conversation', () => {
+    const linkToSeededSession = (status: string) =>
+      client.query(
+        `INSERT INTO appointments (business_id, user_id, service_id, starts_at, ends_at, status, chat_session_id)
+         VALUES ($1, $2, $3, now() + interval '43 days', now() + interval '43 days 30 minutes', $4, $5)`,
+        [bluewave.id, users.customer.id, services.routineCheckup.id, status, SEEDED_SESSION],
+      );
+
+    it('rejects a second live appointment for a conversation that already holds one', async () => {
+      for (const status of ['pending', 'confirmed']) {
+        const error = await refused(
+          `INSERT INTO appointments (business_id, user_id, service_id, starts_at, ends_at, status, chat_session_id)
+           VALUES ($1, $2, $3, now() + interval '43 days', now() + interval '43 days 30 minutes', $4, $5)`,
+          [bluewave.id, users.customer.id, services.routineCheckup.id, status, SEEDED_SESSION],
+        );
+        assert.equal(error.code, '23505', status);
+        assert.equal(error.constraint, 'appointments_one_live_per_chat_session', status);
+      }
+    });
+
+    it('allows a cancelled or finished one alongside it, and a new one once the first is cancelled', async () => {
+      await inRollback(async () => {
+        await linkToSeededSession('cancelled');
+        await linkToSeededSession('completed');
+        await client.query(`UPDATE appointments SET status = 'cancelled' WHERE id = $1`, [SEEDED_WHITENING]);
+        await linkToSeededSession('confirmed');
+      });
     });
   });
 

@@ -28,6 +28,8 @@ export const ERROR_CODES = {
   APPOINTMENT_IN_PAST: 'APPOINTMENT_IN_PAST',
   /** The appointment is already cancelled or completed; there is nothing to cancel. */
   APPOINTMENT_NOT_CANCELLABLE: 'APPOINTMENT_NOT_CANCELLABLE',
+  /** An Idempotency-Key was reused with different booking details. */
+  IDEMPOTENCY_KEY_REUSED: 'IDEMPOTENCY_KEY_REUSED',
   /** The conversation already produced its booking and accepts no further turns. */
   SESSION_CLOSED: 'SESSION_CLOSED',
   /**

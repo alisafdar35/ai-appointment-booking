@@ -2,6 +2,7 @@
 
 import { zodResolver } from '@hookform/resolvers/zod';
 import { ERROR_CODES, loginSchema } from '@appt/shared';
+import { useSearchParams } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import type { z } from 'zod';
@@ -11,6 +12,7 @@ import { FormField } from '@/components/ui/FormField';
 import { Input } from '@/components/ui/Input';
 import { hasErrorCode } from '@/lib/api';
 import { applyApiFieldErrors } from '@/lib/form-errors';
+import { SESSION_EXPIRED_PARAM } from '@/lib/routes';
 import { useAuth } from '@/providers/AuthProvider';
 import { describeAuthError, firstServerErrorField, type AuthFormError } from './auth-errors';
 import { DEMO_ACCOUNT } from './demo-account';
@@ -31,6 +33,9 @@ export function LoginForm() {
   const { login } = useAuth();
   const [formError, setFormError] = useState<AuthFormError | null>(null);
   const submitRef = useRef<HTMLButtonElement>(null);
+  // From the router, not window.location: after a client-side redirect here the
+  // form can mount before the browser's URL has been updated.
+  const sessionExpired = useSearchParams().get(SESSION_EXPIRED_PARAM) === '1';
 
   const {
     register,
@@ -75,6 +80,11 @@ export function LoginForm() {
       {formError ? (
         <Alert tone={formError.tone} title={formError.title}>
           {formError.message}
+        </Alert>
+      ) : sessionExpired ? (
+        <Alert tone="info" title="Your session has ended">
+          For your security you were signed out. Sign in again to carry on where you left off; a booking you were
+          filling in is kept.
         </Alert>
       ) : null}
 

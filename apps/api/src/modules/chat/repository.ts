@@ -226,17 +226,9 @@ export async function updateDraft(
   ]);
 }
 
-export async function updateSessionMeta(
-  client: Queryable,
-  sessionId: string,
-  patch: { status?: ChatSessionStatus; title?: string },
-): Promise<void> {
-  await client.query(
-    `UPDATE chat_sessions
-     SET status = COALESCE($2, status), title = COALESCE($3, title)
-     WHERE id = $1`,
-    [sessionId, patch.status ?? null, patch.title?.slice(0, 200) ?? null],
-  );
+/** Status is not set here: a session is completed only by the booking that closes it (bookInSession). */
+export async function updateSessionTitle(client: Queryable, sessionId: string, title: string): Promise<void> {
+  await client.query(`UPDATE chat_sessions SET title = $2 WHERE id = $1`, [sessionId, title.slice(0, 200)]);
 }
 
 /**
@@ -274,21 +266,24 @@ export async function findBusinessContext(businessId: string): Promise<{
   timezone: string;
   opensAt: string;
   closesAt: string;
+  /** ISO weekdays, 1 = Monday ... 7 = Sunday. */
+  openDays: number[];
 } | null> {
   const { rows } = await pool.query<{
     name: string;
     timezone: string;
     opens_at: string;
     closes_at: string;
+    open_days: number[];
   }>(
     `SELECT name, timezone, to_char(opens_at, 'HH24:MI') AS opens_at,
-            to_char(closes_at, 'HH24:MI') AS closes_at
+            to_char(closes_at, 'HH24:MI') AS closes_at, open_days
      FROM businesses WHERE id = $1`,
     [businessId],
   );
   const row = rows[0];
   return row
-    ? { name: row.name, timezone: row.timezone, opensAt: row.opens_at, closesAt: row.closes_at }
+    ? { name: row.name, timezone: row.timezone, opensAt: row.opens_at, closesAt: row.closes_at, openDays: row.open_days }
     : null;
 }
 

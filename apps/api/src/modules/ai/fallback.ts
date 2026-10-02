@@ -1,7 +1,8 @@
 import * as chrono from 'chrono-node';
-import type { BookingSlots } from '@appt/shared';
-import { humanDate, humanTime, todayInZone, zonedNow } from '../../lib/time.js';
-import { confirmationPrompt } from './copy.js';
+import { SLOT_GRID_MINUTES, type BookingSlots, type ServiceDto } from '@appt/shared';
+import { humanDate, humanTime, wallClock } from '../../lib/time.js';
+import { confirmationPrompt, formatPrice } from './copy.js';
+import { openDaysPhrase } from './prompts.js';
 import type { AiProvider, AssistantIntent, ProviderInput, ProviderOutput } from './provider.js';
 
 /**
@@ -27,19 +28,29 @@ import type { AiProvider, AssistantIntent, ProviderInput, ProviderOutput } from 
  * makes the interaction pleasant, this makes it reliable.
  */
 
-const CONFIRM_PATTERNS = [
-  /^(yes|yep|yeah|yup|sure|ok|okay|sounds good|perfect|great)\b/i,
-  /\b(book|confirm)\s*(it|that|this|please)?\b/i,
-  /\b(go ahead|that works|works for me|lets do it|let's do it|do it)\b/i,
+/**
+ * Consent is an allow-list: a message agrees only when it is made up entirely
+ * of these short forms ("yes", "yes please, book it", "ok, sounds good!").
+ * Looking for consent words anywhere was the bug: "Can you confirm the price
+ * first?" contains "confirm" and booked. Anything else — a question, a "but",
+ * a "wait", a change — is not agreement, whatever words it shares with one.
+ * Wrongly refusing costs one more "yes"; wrongly accepting costs a booking.
+ */
+const AGREEMENT = [
+  'yes', 'yes please', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay', 'alright', 'all right', 'absolutely', 'of course',
+  'correct', 'perfect', 'great', 'sounds good', 'sounds great', 'that works', 'works for me', 'thats right',
+  'confirm', 'confirm it', 'confirm that', 'confirmed', 'book it', 'book that', 'book this', 'please book it',
+  'go ahead', 'go for it', 'please do', 'do it', 'lets do it',
 ];
-
-const DECLINE_PATTERNS = [/^(no|nope|nah)\b/i, /\b(different|another|change|instead)\b/i];
+/** Politeness that may accompany agreement but is not agreement by itself. */
+const COURTESY = ['please', 'thanks', 'thank you'];
+const CONSENT_PHRASES = [...AGREEMENT, ...COURTESY]
+  .map((phrase) => phrase.split(' '))
+  .sort((a, b) => b.length - a.length);
 
 /**
- * A negated or deferred request ("don't book it", "wait", "hold off") contains
- * the very words CONFIRM_PATTERNS looks for. It is checked first and wins:
- * refusing to book on a sentence that merely mentions booking costs one more
- * "yes"; booking on one the user meant as a refusal costs a real appointment.
+ * "don't", "not", "wait", "hold off": whatever the message names, it is not
+ * asking for it. Used to say plainly that nothing was booked.
  */
 const NEGATION = /\b(don['’]?t|do not|not|never|no need|hold (?:off|on)|wait|rather not|stop)\b/i;
 
@@ -64,39 +75,101 @@ export class FallbackProvider implements AiProvider {
 
     let intent: AssistantIntent = CANCEL_PATTERNS.some((p) => p.test(text)) ? 'cancelling' : 'collecting';
     const slots = extractSlots(text, input);
+    const clarification = findClarification(text, input);
 
     // ---- confirmation --------------------------------------------------
-    const merged: BookingSlots = {
-      serviceName: slots.serviceName ?? input.draft.serviceName,
-      date: slots.date ?? input.draft.date,
-      time: slots.time ?? input.draft.time,
-      notes: input.draft.notes,
-    };
+    const merged = withoutClarified(
+      {
+        serviceName: slots.serviceName ?? input.draft.serviceName,
+        date: slots.date ?? input.draft.date,
+        time: slots.time ?? input.draft.time,
+        notes: input.draft.notes,
+      },
+      clarification,
+    );
     const complete = Boolean(merged.serviceName && merged.date && merged.time);
+    if (complete && isAffirmative(text)) intent = 'confirming';
 
-    const isConfirming =
-      complete &&
-      !NEGATION.test(text) &&
-      !DECLINE_PATTERNS.some((p) => p.test(text.trim())) &&
-      CONFIRM_PATTERNS.some((p) => p.test(text.trim()));
-    if (isConfirming) intent = 'confirming';
+    // "How much is it?" with a summary on screen is answered, and the chat
+    // service repeats the summary after it (an aside, intent 'other').
+    const answer = intent === 'cancelling' ? null : answerAboutService(text, merged.serviceName, input.services);
+    if (answer) intent = 'other';
+    const reply =
+      intent === 'cancelling'
+        ? CANCEL_REPLY
+        : answer && complete && !clarification
+          ? answer
+          : [answer, composeReply(merged, input, clarification)].filter(Boolean).join(' ');
 
     return {
-      reply: intent === 'cancelling' ? CANCEL_REPLY : composeReply(merged, input),
+      reply,
       slots,
       intent,
       engine: this.engine,
       latencyMs: Date.now() - startedAt,
+      ...(clarification ? { clarify: clarification.fields } : {}),
     };
   }
 }
+
+/**
+ * Is this message plain agreement, and nothing else? A question mark rules it
+ * out; otherwise every word must belong to the AGREEMENT/COURTESY forms, with
+ * at least one real agreement. Used for both engines: the model's `confirming`
+ * intent is only honoured when this agrees (see guardrails.ts), so readiness
+ * to save is decided by code.
+ */
+export function isAffirmative(text: string): boolean {
+  if (text.includes('?')) return false;
+  const words = text
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    // Trivial punctuation and emoji ("Yes!", "ok 👍") carry no meaning here.
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  let agreed = false;
+  for (let i = 0; i < words.length; ) {
+    const phrase = CONSENT_PHRASES.find((p) => p.every((word, k) => words[i + k] === word));
+    if (!phrase) return false;
+    agreed ||= AGREEMENT.includes(phrase.join(' '));
+    i += phrase.length;
+  }
+  return agreed;
+}
+
+const PRICE_QUESTION = /\b(price|prices|cost|costs|how much|fee|charge)\b/i;
+const DURATION_QUESTION = /\b(how long|duration|minutes|mins)\b/i;
+
+/**
+ * The catalogue's answer to a question about the service's price or length
+ * ("Can you confirm the price first?", "is that 60 minutes?"), or null when
+ * the message asks neither or no service is known. Facts come from the
+ * catalogue, never from a model, so the answer cannot be wrong about them.
+ */
+export function answerAboutService(
+  text: string,
+  serviceName: string | null,
+  services: Pick<ServiceDto, 'name' | 'durationMinutes' | 'priceCents'>[],
+): string | null {
+  const price = PRICE_QUESTION.test(text);
+  if (!price && !DURATION_QUESTION.test(text)) return null;
+  const service = services.find((s) => s.name.toLowerCase() === serviceName?.toLowerCase());
+  if (!service) return null;
+  const cost = service.priceCents > 0 ? `costs ${formatPrice(service.priceCents)}` : 'has no charge';
+  return `${service.name} takes ${service.durationMinutes} minutes and ${cost}.`;
+}
+
+/** "don't", "not", "wait", "hold off": whatever the message names, it is not asking for it. */
+export const negates = (text: string): boolean => NEGATION.test(text);
 
 /** The message this turn is answering: the newest user entry in the history. */
 export function lastUserMessage(input: Pick<ProviderInput, 'history'>): string {
   return [...input.history].reverse().find((m) => m.role === 'user')?.content ?? '';
 }
 
-type ExtractionContext = Pick<ProviderInput, 'timezone' | 'opensAt' | 'closesAt' | 'services'>;
+type ExtractionContext = Pick<ProviderInput, 'opensAt' | 'closesAt' | 'openDays' | 'services' | 'today' | 'nowTime'>;
 
 /**
  * Read the booking slots one message states, by code alone.
@@ -112,22 +185,25 @@ export function extractSlots(text: string, ctx: ExtractionContext): Partial<Book
   if (service) slots.serviceName = service;
 
   // ---- date and time -------------------------------------------------
-  const date = readDate(text, ctx);
+  // A date or time with two readings is not taken at all: findClarification
+  // asks which one was meant.
+  const dateAmbiguous = readDateAmbiguity(text, ctx) !== null;
+  const date = dateAmbiguous ? null : readDate(text, ctx);
   if (date) slots.date = date;
 
   // chrono resolves "October 12th" but not a bare "the 12th", which is how
   // people most often propose a date in conversation.
-  if (!slots.date) {
-    const ordinal = matchOrdinalDay(text, todayInZone(ctx.timezone));
+  if (!slots.date && !dateAmbiguous) {
+    const ordinal = matchOrdinalDay(text, ctx.today);
     if (ordinal) slots.date = ordinal;
   }
 
   const time = readTime(text, ctx);
-  if (time) slots.time = time.time;
+  if (time?.kind === 'clock') slots.time = time.time;
 
   // "morning"/"afternoon"/"evening" with no clock time: offer a sensible
   // default inside opening hours rather than discarding the preference.
-  if (!slots.time) {
+  if (!time) {
     const vague = matchVagueTime(text, ctx.opensAt, ctx.closesAt);
     if (vague) slots.time = vague;
   }
@@ -136,6 +212,15 @@ export function extractSlots(text: string, ctx: ExtractionContext): Partial<Book
 }
 
 const pad = (n: number | null | undefined): string => String(n ?? 0).padStart(2, '0');
+
+/**
+ * chrono's reading of a message, resolved against the business's wall clock as
+ * this turn sees it (`today`, `nowTime`), not the server's: "tomorrow" must not
+ * shift by a day for a server in another timezone, and every check on one turn
+ * must agree on which day "today" is.
+ */
+const parseDates = (text: string, ctx: Pick<ExtractionContext, 'today' | 'nowTime'>) =>
+  chrono.parse(text, wallClock(ctx.today, ctx.nowTime), { forwardDate: true });
 
 /**
  * Match a service by substring, then by token overlap.
@@ -206,11 +291,11 @@ export function matchOrdinalDay(text: string, today: string): string | null {
  * This is the calendar arithmetic ("next Wednesday" from today's date in the
  * business's zone) — the part the model cross-check trusts over the model.
  */
-export function readDate(text: string, ctx: Pick<ExtractionContext, 'timezone'>): string | null {
-  // chrono resolves relative expressions against a reference instant. That
-  // reference must be the business's wall clock, not the server's, or
-  // "tomorrow" shifts by a day for a server in a different timezone.
-  for (const { text: matched, start } of chrono.parse(text, zonedNow(ctx.timezone), { forwardDate: true })) {
+export function readDate(
+  text: string,
+  ctx: Pick<ExtractionContext, 'opensAt' | 'closesAt' | 'openDays' | 'today' | 'nowTime'>,
+): string | null {
+  for (const { text: matched, start } of parseDates(text, ctx)) {
     // Skip ranges too vague to pin to a day (see VAGUE_RANGE).
     if (VAGUE_RANGE.test(matched.trim())) continue;
     // A date is only taken when chrono is actually confident about it.
@@ -218,33 +303,43 @@ export function readDate(text: string, ctx: Pick<ExtractionContext, 'timezone'>)
     // bare time like "2pm" — treating that as a stated date would book
     // people for today whenever they mentioned a time.
     if (start.isCertain('day') || start.isCertain('weekday') || start.isCertain('month')) {
-      return `${start.get('year')}-${pad(start.get('month'))}-${pad(start.get('day'))}`;
+      const date = `${start.get('year')}-${pad(start.get('month'))}-${pad(start.get('day'))}`;
+      // chrono reads "Friday" said on a Friday as today. Once today can no
+      // longer be booked it can only mean a week today; while it can,
+      // readDateAmbiguity asks instead.
+      return date === ctx.today && namesWeekdayOnly(matched, start) && !todayStillBookable(text, ctx)
+        ? addDays(ctx.today, 7)
+        : date;
     }
   }
   return null;
 }
 
 /**
- * A clock time the message states, as HH:MM. `settled` is true when the text
- * itself fixes AM or PM — "3pm", "15:30", "noon", "afternoon around 3" — and
- * false when the hour had to be placed by opening hours ("at 10"), a guess the
- * model, which has the whole conversation, may make better. Only a settled
- * time overrules the model (see guardrails.ts).
+ * A clock time the message states, as HH:MM, or both readings of an hour said
+ * without AM or PM when they cannot be told apart (see resolveMeridiem). An
+ * ambiguous hour is never stored: the user is asked which one they meant.
  */
-export interface StatedTime {
-  time: string;
-  settled: boolean;
-}
+export type StatedTime =
+  | { kind: 'clock'; time: string }
+  | { kind: 'ambiguous'; readings: [am: string, pm: string]; bookable: boolean };
 
-export function readTime(text: string, ctx: Pick<ExtractionContext, 'timezone' | 'opensAt' | 'closesAt'>): StatedTime | null {
-  const clock = (hour: number, minute: number, meridiemStated: boolean): StatedTime => ({
+export function readTime(
+  text: string,
+  ctx: Pick<ExtractionContext, 'today' | 'nowTime' | 'opensAt' | 'closesAt'>,
+): StatedTime | null {
+  const clock = (hour: number, minute: number, meridiemStated: boolean): StatedTime => {
     // chrono reads a bare "at 3" as 3 AM. Only an explicit am/pm settles it.
-    time: `${pad(meridiemStated ? hour : resolveMeridiem(hour, minute, text, ctx))}:${pad(minute)}`,
-    settled: meridiemStated || hour === 0 || hour >= 12 || statedPartOfDay(text) !== null,
-  });
+    const placed = meridiemStated ? hour : resolveMeridiem(hour, minute, text, ctx);
+    if (placed !== null) return { kind: 'clock', time: `${pad(placed)}:${pad(minute)}` };
+    const am = `${pad(hour)}:${pad(minute)}`;
+    return { kind: 'ambiguous', readings: [am, `${pad(hour + 12)}:${pad(minute)}`], bookable: isOpenAt(am, ctx) };
+  };
 
-  for (const { start } of chrono.parse(text, zonedNow(ctx.timezone), { forwardDate: true })) {
-    if (start.isCertain('hour')) return clock(start.get('hour') ?? 0, start.get('minute') ?? 0, start.isCertain('meridiem'));
+  for (const { text: matched, start } of parseDates(text, ctx)) {
+    // A leading zero ("08:15") is 24-hour notation, which settles the hour.
+    const settled = start.isCertain('meridiem') || /\b0\d:[0-5]\d/.test(matched);
+    if (start.isCertain('hour')) return clock(start.get('hour') ?? 0, start.get('minute') ?? 0, settled);
   }
   // chrono does not read a clock hour without "at" or am/pm ("around 3",
   // "4ish"), and a part of the day ahead of it ("afternoon around 3") would
@@ -275,30 +370,158 @@ export function matchBareHour(text: string): { hour: number; minute: number } | 
 }
 
 /**
- * AM or PM, for an hour said without either ("at 3", "around 4").
+ * AM or PM, for an hour said without either ("at 3", "around 4"), or null when
+ * the hour cannot be placed and the user must be asked.
  *
- * In order: a stated part of the day decides ("morning" keeps AM; "afternoon"
- * and "evening" mean PM); otherwise the reading that falls inside opening hours
- * wins; and when both or neither do, 1–7 means PM, because nobody asks a
- * dentist for 3 in the morning. 24-hour values and 12 are taken as said.
+ * A stated part of the day decides ("morning" keeps AM; "afternoon" and
+ * "evening" mean PM). Otherwise the hour is placed only when exactly one
+ * reading can start an appointment inside opening hours: "at 3" is 3 PM and
+ * "at 10" is 10 AM for a 9–5 business, and the confirmation shows which. When
+ * neither reading can ("at 5": 5 AM is before opening, 5 PM is closing time)
+ * or both can (a business open 8 AM to 10 PM, "at 9"), picking one would book
+ * a time the user may not have meant, so null. 24-hour values and 12 are taken
+ * as said.
  */
 export function resolveMeridiem(
   hour: number,
   minute: number,
   text: string,
   hours: Pick<ProviderInput, 'opensAt' | 'closesAt'>,
-): number {
+): number | null {
   if (hour === 0 || hour >= 12) return hour;
   const part = statedPartOfDay(text);
   if (part) return part === 'am' ? hour : hour + 12;
 
-  const open = toMinutes(hours.opensAt);
-  const close = toMinutes(hours.closesAt);
-  const isOpen = (h: number) => h * 60 + minute >= open && h * 60 + minute < close;
-  const am = isOpen(hour);
-  const pm = isOpen(hour + 12);
-  if (am !== pm) return am ? hour : hour + 12;
-  return hour <= 7 ? hour + 12 : hour;
+  const am = isOpenAt(`${pad(hour)}:${pad(minute)}`, hours);
+  const pm = isOpenAt(`${pad(hour + 12)}:${pad(minute)}`, hours);
+  if (am === pm) return null;
+  return am ? hour : hour + 12;
+}
+
+/** Can an appointment start at this HH:MM? Opening time inclusive, closing time exclusive. */
+function isOpenAt(time: string, hours: Pick<ProviderInput, 'opensAt' | 'closesAt'>): boolean {
+  const at = toMinutes(time);
+  return at >= toMinutes(hours.opensAt) && at < toMinutes(hours.closesAt);
+}
+
+/**
+ * A date written as two small numbers ("03/04") reads as March 4 in the US and
+ * 3 April almost everywhere else. A weekday named on that same weekday ("on
+ * Friday", said on a Friday) may mean today or a week today — but only when
+ * both can actually be booked (see todayStillBookable); otherwise readDate
+ * takes a week today. Both readings are returned, earlier first, so
+ * the user can be asked; null when the text names a date one way only.
+ */
+export function readDateAmbiguity(
+  text: string,
+  ctx: Pick<ExtractionContext, 'opensAt' | 'closesAt' | 'openDays' | 'today' | 'nowTime'>,
+): [string, string] | null {
+  const numeric = text.match(/(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?(?![\d/])/);
+  if (numeric) {
+    const [a, b] = [Number(numeric[1]), Number(numeric[2])];
+    if (a >= 1 && b >= 1 && a <= 12 && b <= 12 && a !== b) {
+      const year = numeric[3] ? Number(numeric[3].padStart(4, '20')) : null;
+      const readings = [nextOccurrence(a, b, year, ctx.today), nextOccurrence(b, a, year, ctx.today)].sort();
+      return readings as [string, string];
+    }
+  }
+
+  // chrono reads a weekday named on that weekday as today; taking today
+  // silently is as much a guess as skipping it.
+  const todayWeekday = new Date(`${ctx.today}T12:00:00Z`).getUTCDay();
+  for (const { text: matched, start } of parseDates(text, ctx)) {
+    if (namesWeekdayOnly(matched, start) && start.get('weekday') === todayWeekday) {
+      return todayStillBookable(text, ctx) ? [ctx.today, addDays(ctx.today, 7)] : null;
+    }
+  }
+  return null;
+}
+
+/** "Friday" or "this Friday": a weekday with no date and no "next" to place it. */
+const namesWeekdayOnly = (matched: string, start: chrono.ParsedComponents): boolean =>
+  start.isCertain('weekday') && !start.isCertain('day') && !/\b(next|following|coming)\b/i.test(matched);
+
+/**
+ * Can today still be booked, for a message naming today's weekday? A week
+ * today is the same weekday, so it is bookable exactly when that weekday is an
+ * open day. Today also needs a start time left: an appointment slot on the
+ * grid after now and before closing, and, if the message states a time, that
+ * time still ahead. When today cannot be booked there is nothing to ask: a
+ * week today is the only reading left (and on a closed weekday the booking
+ * check then says so).
+ */
+function todayStillBookable(
+  text: string,
+  ctx: Pick<ExtractionContext, 'opensAt' | 'closesAt' | 'openDays' | 'today' | 'nowTime'>,
+): boolean {
+  const isoWeekday = ((new Date(`${ctx.today}T12:00:00Z`).getUTCDay() + 6) % 7) + 1;
+  if (!ctx.openDays.includes(isoWeekday)) return false;
+
+  // Slots start on the grid from opening time, and only strictly after now.
+  const [now, opens] = [toMinutes(ctx.nowTime), toMinutes(ctx.opensAt)];
+  const nextSlot = now < opens ? opens : opens + (Math.floor((now - opens) / SLOT_GRID_MINUTES) + 1) * SLOT_GRID_MINUTES;
+  if (nextSlot >= toMinutes(ctx.closesAt)) return false;
+
+  const stated = readTime(text, ctx);
+  return stated?.kind !== 'clock' || toMinutes(stated.time) > now;
+}
+
+/** The first `month`/`day` on or after today, or in `year` when one was written. */
+function nextOccurrence(month: number, day: number, year: number | null, today: string): string {
+  const iso = (y: number) => `${y}-${pad(month)}-${pad(day)}`;
+  if (year) return iso(year);
+  const thisYear = Number(today.slice(0, 4));
+  return iso(thisYear) >= today ? iso(thisYear) : iso(thisYear + 1);
+}
+
+function addDays(date: string, days: number): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * What the latest message left open, and the question that settles it. The
+ * same check runs on the fallback's reading and on a model's answer (see
+ * guardrails.ts), so both engines ask rather than guess, in the same words.
+ */
+export interface Clarification {
+  fields: ('date' | 'time')[];
+  question: string;
+}
+
+export function findClarification(
+  text: string,
+  ctx: Pick<ExtractionContext, 'opensAt' | 'closesAt' | 'openDays' | 'today' | 'nowTime'>,
+): Clarification | null {
+  const fields: Clarification['fields'] = [];
+  const questions: string[] = [];
+
+  const dates = readDateAmbiguity(text, ctx);
+  if (dates) {
+    fields.push('date');
+    questions.push(`Did you mean ${humanDate(dates[0])} or ${humanDate(dates[1])}?`);
+  }
+
+  const time = readTime(text, ctx);
+  if (time?.kind === 'ambiguous') {
+    const [am, pm] = time.readings.map(humanTime) as [string, string];
+    fields.push('time');
+    questions.push(
+      time.bookable
+        ? `Did you mean ${am} or ${pm}?`
+        : `Did you mean ${am} or ${pm}? We're open ${humanTime(ctx.opensAt)} to ${humanTime(ctx.closesAt)}, so neither can start an appointment. What time in those hours suits you?`,
+    );
+  }
+
+  return fields.length ? { fields, question: questions.join(' ') } : null;
+}
+
+/** The draft with the fields a clarification reopened set back to unknown. */
+export function withoutClarified(draft: BookingSlots, clarification: Clarification | null): BookingSlots {
+  const reopened = { ...draft };
+  for (const field of clarification?.fields ?? []) reopened[field] = null;
+  return reopened;
 }
 
 /** "morning" keeps an hour in the AM; "afternoon", "evening" and the like move it to the PM. */
@@ -336,11 +559,12 @@ const CANCEL_REPLY =
  */
 export function composeReply(
   merged: BookingSlots,
-  input: Pick<ProviderInput, 'services' | 'opensAt' | 'closesAt'>,
+  input: Pick<ProviderInput, 'services' | 'opensAt' | 'closesAt' | 'openDays'>,
+  clarification: Clarification | null = null,
 ): string {
   // Also the reply to a "yes" that changed something: the booking is not made
   // until the user agrees to the summary they have actually seen.
-  if (merged.serviceName && merged.date && merged.time) {
+  if (merged.serviceName && merged.date && merged.time && !clarification) {
     return confirmationPrompt(merged.serviceName, merged.date, merged.time);
   }
 
@@ -351,10 +575,17 @@ export function composeReply(
   ].filter(Boolean);
 
   const prefix = acknowledged.length ? `Got it — ${acknowledged.join(', ')}. ` : '';
-  const openingHours = `We're open ${humanTime(input.opensAt)} to ${humanTime(input.closesAt)}.`;
+  // Days are named only when some are closed: "every day" adds nothing to a question.
+  const days = input.openDays.length < 7 ? `${openDaysPhrase(input.openDays)}, ` : '';
+  const openingHours = `We're open ${days}${humanTime(input.opensAt)} to ${humanTime(input.closesAt)}.`;
+  if (clarification) return `${prefix}${clarification.question}`;
 
   if (!merged.serviceName) {
     const names = input.services.slice(0, 4).map((s) => s.name).join(', ');
+    // Nothing known yet: ask for all of it at once rather than over three turns.
+    if (!merged.date && !merged.time) {
+      return `Which service would you like, and what day and time suit you? We offer: ${names}. ${openingHours}`;
+    }
     return `${prefix}Which service would you like? We offer: ${names}.`;
   }
   if (!merged.date && !merged.time) return `${prefix}What day and time would suit you? ${openingHours}`;

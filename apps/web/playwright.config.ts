@@ -44,5 +44,13 @@ export default defineConfig({
   projects: [
     { name: 'desktop', use: { ...devices['Desktop Chrome'] } },
     { name: 'mobile', use: { ...devices['Pixel 7'] } },
+    // Opt-in (E2E_ALL_BROWSERS=1 npm run e2e), after `npx playwright install firefox webkit`:
+    // CI installs Chromium only. The keyboard-only spec is pinned to Chromium (see its comment).
+    ...(process.env.E2E_ALL_BROWSERS
+      ? [
+          { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+          { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+        ]
+      : []),
   ],
 });

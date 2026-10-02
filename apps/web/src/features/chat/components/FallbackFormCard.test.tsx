@@ -13,6 +13,7 @@ const DAY: AvailabilityDto = {
   date: '2026-10-05',
   serviceId: CHECKUP.id,
   durationMinutes: 30,
+  closed: false,
   slots: [
     { time: '09:00', available: true },
     { time: '14:00', available: true },
@@ -92,6 +93,28 @@ describe('FallbackFormCard', () => {
     await user.type(date, '2026-10-06');
 
     await waitFor(() => expect(screen.queryByRole('radio', { checked: true })).not.toBeInTheDocument());
+  });
+
+  it('keeps what the user picked or typed when a reply changes the draft while the form is open', async () => {
+    // A turn can land while the form is on screen (from another tab, or a message
+    // sent just before). Untouched fields follow the server; edited ones never move.
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const props = { reason: 'requested' as const, onSubmit: vi.fn(), onBooked: vi.fn(), onClose: vi.fn() };
+    const ui = (draft: BookingSlots) => (
+      <QueryClientProvider client={client}>
+        <FallbackFormCard {...props} draft={draft} />
+      </QueryClientProvider>
+    );
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const { rerender } = render(ui({ ...COMPLETE_DRAFT, notes: null }));
+    await user.click(await screen.findByRole('radio', { name: '3:00 PM' }));
+    await user.type(screen.getByRole('textbox', { name: /notes/i }), 'Mine');
+
+    rerender(ui({ ...COMPLETE_DRAFT, serviceName: 'Teeth Whitening', time: '09:00', notes: 'From the assistant' }));
+
+    await waitFor(() => expect(screen.getByRole('combobox', { name: /service/i })).toHaveValue('Teeth Whitening'));
+    expect(await screen.findByRole('radio', { name: '3:00 PM' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('textbox', { name: /notes/i })).toHaveValue('Mine');
   });
 
   describe('server errors', () => {

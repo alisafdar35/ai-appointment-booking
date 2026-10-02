@@ -178,5 +178,24 @@ export interface AvailabilityDto {
   date: string;
   serviceId: string;
   durationMinutes: number;
+  /** The business does not open on this weekday; `slots` is then empty. */
+  closed: boolean;
   slots: { time: string; available: boolean }[];
 }
+
+/**
+ * Request header that makes POST /api/appointments safe to retry.
+ *
+ * A client generates one key per booking attempt (a UUID is ideal) and sends
+ * the same key on every retry of it. The same key with the same details
+ * replays the original 201 response, marked with IDEMPOTENT_REPLAY_HEADER; the
+ * same key with different details is refused with IDEMPOTENCY_KEY_REUSED.
+ * Keys are scoped to the signed-in user and honoured for 24 hours.
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
+export const IDEMPOTENT_REPLAY_HEADER = 'Idempotent-Replayed';
+
+/** Printable ASCII, no spaces, 1-255 characters (the database enforces the same). */
+export const idempotencyKeySchema = z
+  .string()
+  .regex(/^[\x21-\x7E]{1,255}$/, 'Use 1-255 printable characters with no spaces, such as a UUID');

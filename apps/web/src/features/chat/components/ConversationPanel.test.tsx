@@ -562,6 +562,7 @@ describe('the form in a brand-new conversation (real controller)', () => {
     vi.spyOn(servicesApi, 'availability').mockResolvedValue({
       date: '2026-10-05',
       serviceId: CHECKUP.id,
+      closed: false,
       durationMinutes: 30,
       slots: [{ time: '14:00', available: true }],
     });

@@ -196,15 +196,26 @@ export async function listForChatSession(
 }
 
 /** Is this conversation the caller's own, in their tenant? */
-export async function ownsChatSession(
+/**
+ * Lock the caller's conversation row for the rest of the transaction and
+ * return its status, or null when it is not the caller's. Every booking that
+ * links a conversation takes this lock first (see bookInSession).
+ */
+export async function lockChatSession(
+  client: Queryable,
   ctx: { businessId: string; userId: string },
   sessionId: string,
-): Promise<boolean> {
-  const { rowCount } = await pool.query(
-    'SELECT 1 FROM chat_sessions WHERE id = $1 AND business_id = $2 AND user_id = $3',
+): Promise<string | null> {
+  const { rows } = await client.query<{ status: string }>(
+    'SELECT status FROM chat_sessions WHERE id = $1 AND business_id = $2 AND user_id = $3 FOR UPDATE',
     [sessionId, ctx.businessId, ctx.userId],
   );
-  return (rowCount ?? 0) > 0;
+  return rows[0]?.status ?? null;
+}
+
+/** A conversation that has booked is finished; set inside the booking's transaction. */
+export async function completeChatSession(client: Queryable, sessionId: string): Promise<void> {
+  await client.query(`UPDATE chat_sessions SET status = 'completed' WHERE id = $1`, [sessionId]);
 }
 
 export async function cancel(

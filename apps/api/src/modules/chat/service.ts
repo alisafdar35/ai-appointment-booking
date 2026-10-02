@@ -17,7 +17,7 @@ import { logger } from '../../lib/logger.js';
 import { badRequest, notFound, sessionClosed } from '../../lib/errors.js';
 import { humanDate, humanTime, nowTimeInZone, shortDate, todayInZone } from '../../lib/time.js';
 import { DEFAULT_SESSION_TITLE, titleFromMessage } from './title.js';
-import { confirmationPrompt, generateAssistantTurn } from '../ai/index.js';
+import { confirmationPrompt, generateAssistantTurn, heldPrompt, negates } from '../ai/index.js';
 import * as appointments from '../appointments/service.js';
 import * as repo from './repository.js';
 
@@ -97,6 +97,44 @@ export async function handleUserMessage(
   input: SendMessageInput,
   hooks: { onGenerating?: (sessionId: string) => void } = {},
 ): Promise<AssistantTurnDto> {
+  return input.sessionId
+    ? inSessionOrder(input.sessionId, () => handleTurn(ctx, input, hooks))
+    : handleTurn(ctx, input, hooks);
+}
+
+/**
+ * One turn at a time per conversation, in arrival order.
+ *
+ * A turn reads the stored draft, waits seconds on the model, then writes a new
+ * draft. Two overlapping turns would both start from the same draft and the
+ * later write would silently undo the earlier one ("whitening" then "at 3pm"
+ * sent quickly would lose the service), and a second "yes" would race the
+ * first to the booking call. Queued here, each turn starts from the state the
+ * previous one left: the second "yes" finds the conversation closed.
+ *
+ * The queue lives in this process. A second API instance would need a lock in
+ * the database; until then the exclusion constraints still guarantee one
+ * booking per slot, and the closed-session check refuses a late "yes".
+ */
+const sessionQueues = new Map<string, Promise<unknown>>();
+
+async function inSessionOrder<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+  const previous = sessionQueues.get(sessionId) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(work);
+  sessionQueues.set(sessionId, current);
+  try {
+    return await current;
+  } finally {
+    // Only the last queued turn may remove the entry, or a later one would lose its place.
+    if (sessionQueues.get(sessionId) === current) sessionQueues.delete(sessionId);
+  }
+}
+
+async function handleTurn(
+  ctx: { businessId: string; userId: string; requestId: string },
+  input: SendMessageInput,
+  hooks: { onGenerating?: (sessionId: string) => void },
+): Promise<AssistantTurnDto> {
   const [business, firstName] = await Promise.all([
     repo.findBusinessContext(ctx.businessId),
     repo.findFirstName(ctx.businessId, ctx.userId),
@@ -129,7 +167,7 @@ export async function handleUserMessage(
   // first message typed into it, exactly as one created by that message is.
   const untitled = session.title === DEFAULT_SESSION_TITLE;
   const userMessage = await withTransaction(async (client) => {
-    if (untitled) await repo.updateSessionMeta(client, session.id, { title: titleFromMessage(input.content) });
+    if (untitled) await repo.updateSessionTitle(client, session.id, titleFromMessage(input.content));
     return repo.appendMessage(client, { sessionId: session.id, role: 'user', content: input.content });
   });
 
@@ -145,6 +183,7 @@ export async function handleUserMessage(
     timezone: business.timezone,
     opensAt: business.opensAt,
     closesAt: business.closesAt,
+    openDays: business.openDays,
     today: todayInZone(business.timezone),
     nowTime: nowTimeInZone(business.timezone),
     services,
@@ -166,6 +205,10 @@ export async function handleUserMessage(
   // "cleared" — see @appt/shared. Without that, "actually make it 3pm" would
   // wipe the service the user already picked.
   let draft = mergeSlots(session.bookingDraft, turn.slots);
+  // A field the message reopened without settling ("at 5": AM or PM?) is
+  // unknown again, so the summary still on screen for the old value cannot be
+  // agreed to while the reply asks which one was meant.
+  for (const field of turn.clarify ?? []) draft = { ...draft, [field]: null };
 
   // ---- 6. Resolve the service NAME to a real catalogue row ----------------
   // The model returns a name; only the database can turn that into an id, and
@@ -227,32 +270,40 @@ export async function handleUserMessage(
         action = 'booked';
         appointment = result.appointment;
         replyText = `Booked — ${service!.name} on ${humanDate(draft.date!)} at ${humanTime(draft.time!)}. It's on your dashboard now.`;
+        // The booking closed the session in its own transaction (bookInSession).
         await withTransaction((client) =>
-          repo.updateSessionMeta(client, session.id, {
-            status: 'completed',
-            title: `${service!.name} — ${shortDate(draft.date!)}`,
-          }),
+          repo.updateSessionTitle(client, session.id, `${service!.name} — ${shortDate(draft.date!)}`),
         );
       } else {
-        // The slot went away, or was never valid. Compose the reply from the
-        // booking service's own message rather than asking the model again:
-        // it is accurate, instant, and costs nothing.
-        action = 'collect_info';
-        suggestions = result.suggestions;
-        replyText = result.suggestions?.length
-          ? `${result.message} I could do ${result.suggestions.map((s) => s.label).join(', or ')} — which works?`
-          : `${result.message} ${result.code === 'in_past' ? 'Which day and time would suit you?' : 'What other time would suit you?'}`;
-        // Drop what failed so the next turn asks for it again rather than
-        // re-proposing something that just failed.
-        draft = clearRejected(draft, result.code);
+        // The slot went away, or passed, after the summary was shown.
+        ({ replyText, suggestions, draft } = refusalTurn(draft, result));
         logger.info(
           { sessionId: session.id, code: result.code },
           'Chat booking attempt rejected; offering alternatives',
         );
       }
     } else if (complete) {
-      action = 'confirm';
-      replyText = confirmationPrompt(service.name, draft.date!, draft.time!);
+      // Check the slot before summarising it: a "Just to confirm…" for a time
+      // the booking would refuse (after hours, a closed day, taken) invites a
+      // "yes" that can only be turned down. The booking re-checks on "yes".
+      const refused = await appointments.checkBooking(
+        { businessId: ctx.businessId, userId: ctx.userId },
+        { serviceId: service.id, date: draft.date!, time: draft.time! },
+      );
+      if (refused) {
+        ({ replyText, suggestions, draft } = refusalTurn(draft, refused));
+        logger.info({ sessionId: session.id, code: refused.code }, 'Chat draft refused before confirmation');
+      } else {
+        action = 'confirm';
+        // "Don't book anything yet" against the summary already shown: say plainly
+        // that nothing was booked rather than repeat the question as if unheard.
+        const unchanged = isBookingComplete(session.bookingDraft) && isSameBooking(session.bookingDraft, draft);
+        const held = unchanged && negates(input.content);
+        replyText = (held ? heldPrompt : confirmationPrompt)(service.name, draft.date!, draft.time!);
+        // An aside ("do you have parking?") gets the model's short answer, then
+        // the code-worded summary, so consent is still given to the exact slots.
+        if (unchanged && !held && turn.intent === 'other') replyText = `${turn.reply} ${replyText}`;
+      }
     } else {
       action = 'collect_info';
     }
@@ -319,6 +370,16 @@ export async function handleUserMessage(
  * a rule the chat enforces (or vice versa).
  */
 export async function submitDraft(
+  ctx: { businessId: string; userId: string },
+  sessionId: string,
+  slots: Partial<BookingSlots>,
+): Promise<AssistantTurnDto> {
+  // Queued with the conversation's chat turns: a form submitted while a reply
+  // is still being written must not interleave its draft write with that turn's.
+  return inSessionOrder(sessionId, () => submitDraftNow(ctx, sessionId, slots));
+}
+
+async function submitDraftNow(
   ctx: { businessId: string; userId: string },
   sessionId: string,
   slots: Partial<BookingSlots>,
@@ -390,10 +451,7 @@ export async function submitDraft(
       // Titled like a conversational booking: a session opened straight into
       // the form has no first message to name it, and would otherwise read
       // "New conversation" in the sidebar for good.
-      await repo.updateSessionMeta(client, sessionId, {
-        status: 'completed',
-        title: `${resolution.service.name} — ${shortDate(draft.date!)}`,
-      });
+      await repo.updateSessionTitle(client, sessionId, `${resolution.service.name} — ${shortDate(draft.date!)}`);
     }
     return [request, reply] as const;
   });
@@ -431,15 +489,34 @@ function isSameBooking(a: BookingSlots, b: BookingSlots): boolean {
 }
 
 /**
+ * The turn for a refused slot, whether refused on "yes" or before the summary.
+ * The reply is the booking service's own message rather than the model's: it
+ * is accurate, instant, and costs nothing. What failed is dropped from the
+ * draft so the next turn asks for it again rather than re-proposing it.
+ */
+function refusalTurn(
+  draft: BookingSlots,
+  failure: appointments.BookingFailure,
+): { replyText: string; suggestions: AssistantTurnDto['suggestions']; draft: BookingSlots } {
+  const replyText = failure.suggestions?.length
+    ? `${failure.message} I could do ${failure.suggestions.map((s) => s.label).join(', or ')} — which works?`
+    : `${failure.message} ${clearsDay(failure.code) ? 'Which day and time would suit you?' : 'What other time would suit you?'}`;
+  return { replyText, suggestions: failure.suggestions, draft: clearRejected(draft, failure.code) };
+}
+
+/**
  * Forget what a rejected booking got wrong, keeping what was fine.
  *
- * A taken slot or a closed hour is a problem with the time alone. A time in the
- * past is a problem with the day — keeping that date would reject the next
- * attempt too, however the user changes the time.
+ * A taken slot, a closed hour or a time the clocks skip is a problem with the
+ * time alone. A time in the past or a day the business is closed is a problem
+ * with the day — keeping that date would reject the next attempt too, however
+ * the user changes the time.
  */
 function clearRejected(draft: BookingSlots, code: appointments.BookingFailure['code']): BookingSlots {
-  return code === 'in_past' ? { ...draft, date: null, time: null } : { ...draft, time: null };
+  return clearsDay(code) ? { ...draft, date: null, time: null } : { ...draft, time: null };
 }
+
+const clearsDay = (code: appointments.BookingFailure['code']): boolean => code === 'in_past' || code === 'closed_day';
 
 /**
  * Turn a free-text service name into a catalogue row.

@@ -5,6 +5,7 @@ import { useEffect, type ReactNode } from 'react';
 import { loginHref, ROUTES } from '@/lib/routes';
 import { useAuth } from '@/providers/AuthProvider';
 import { AppShellSkeleton } from './AppShellSkeleton';
+import { SessionRestoreNotice } from './SessionRestoreNotice';
 
 /**
  * Client-side route protection for everything under (app)/.
@@ -25,10 +26,14 @@ export function AuthGuard({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (status !== 'unauthenticated') return;
     // Remember where they were headed — unless they chose to leave.
-    const destination = sessionEnd === 'signed-out' ? ROUTES.login : loginHref(`${pathname}${window.location.search}`);
+    // An expiry mid-session is explained on the sign-in page; a first visit is not.
+    const destination =
+      sessionEnd === 'signed-out'
+        ? ROUTES.login
+        : loginHref(`${pathname}${window.location.search}`, { expired: sessionEnd === 'expired' });
     router.replace(destination);
   }, [status, sessionEnd, pathname, router]);
 
-  if (status !== 'authenticated') return <AppShellSkeleton />;
+  if (status !== 'authenticated') return <AppShellSkeleton notice={<SessionRestoreNotice />} />;
   return <>{children}</>;
 }

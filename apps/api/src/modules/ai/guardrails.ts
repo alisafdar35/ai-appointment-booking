@@ -1,5 +1,16 @@
 import { mergeSlots, type BookingSlots } from '@appt/shared';
-import { composeReply, lastUserMessage, matchService, readDate, readTime } from './fallback.js';
+import {
+  answerAboutService,
+  composeReply,
+  findClarification,
+  isAffirmative,
+  lastUserMessage,
+  matchService,
+  negates,
+  readDate,
+  readTime,
+  withoutClarified,
+} from './fallback.js';
 import type { ProviderInput, ProviderOutput } from './provider.js';
 
 /**
@@ -12,14 +23,24 @@ import type { ProviderInput, ProviderOutput } from './provider.js';
  *      answered 2026-10-08, a Thursday. Resolving a weekday against today's
  *      date is exactly what code is reliable at and language models are not,
  *      so when chrono confidently reads a date from the same message and the
- *      model's differs, chrono wins. Only chrono's certain readings count:
+ *      model's differs or is missing, chrono wins. Only chrono's certain readings count:
  *      "the 12th" needs the month from earlier in the conversation, which the
  *      model has and the parser does not, so there the model is not overruled.
  *
  *   2. Clock times, by the same rule. When the latest message settles a time
- *      on its own ("3pm", "15:30", "afternoon around 3"), that reading wins
- *      over a different or missing one from the model. An hour whose AM/PM
- *      code had to guess from opening hours ("at 10") does not overrule it.
+ *      on its own ("3pm", "15:30", "afternoon around 3", or "at 3" where only
+ *      3 PM is inside opening hours), that reading wins over a different or
+ *      missing one from the model.
+ *
+ *   2a. Ambiguity. Asked "At 5." the model stored 17:00 — closing time — and
+ *      showed it for confirmation. When the message itself has two readings
+ *      (an hour neither or both of whose AM/PM readings can be booked, "03/04",
+ *      "Friday" said on a Friday), the model's pick is dropped, the field is
+ *      reopened, and the reply is the code-composed question the fallback asks.
+ *
+ *   2b. Consent. `confirming` is honoured only when the message is plain
+ *      agreement by the fallback's own test, so "don't book anything yet" can
+ *      never reach the booking call whatever intent the model reports.
  *
  *   3. Services nobody asked for. Asked "whenever" for a day, the model
  *      answered with serviceName "Routine Checkup" — a service the user had
@@ -41,10 +62,13 @@ import type { ProviderInput, ProviderOutput } from './provider.js';
  */
 
 export type GuardrailEvent =
-  | { kind: 'date_corrected'; model: string; deterministic: string }
+  | { kind: 'date_corrected'; model: string | null; deterministic: string }
   | { kind: 'time_corrected'; model: string | null; deterministic: string }
   | { kind: 'service_ungrounded'; model: string; kept: string | null }
-  | { kind: 'reply_replaced'; reason: 'booking_claim' | 'date_mismatch' | 'time_mismatch'; reply: string };
+  | { kind: 'service_filled'; deterministic: string }
+  | { kind: 'clarification_asked'; fields: ('date' | 'time')[]; model: Partial<BookingSlots> }
+  | { kind: 'consent_unsupported' }
+  | { kind: 'reply_replaced'; reason: 'booking_claim' | 'date_mismatch' | 'time_mismatch' | 'filled_in'; reply: string };
 
 /**
  * A booking stated as done. The model is told it cannot book, and the
@@ -80,23 +104,40 @@ export function applyGuardrails(
   input: ProviderInput,
 ): { output: ProviderOutput; events: GuardrailEvent[] } {
   const events: GuardrailEvent[] = [];
-  let { slots, reply } = output;
+  let { slots, reply, intent } = output;
   const latest = lastUserMessage(input);
+  const clarification = findClarification(latest, input);
+  const reopened = new Set(clarification?.fields);
 
-  const date = readDate(latest, input);
-  if (date && slots.date && slots.date !== date) {
-    events.push({ kind: 'date_corrected', model: slots.date, deterministic: date });
+  // A date or time the model left out is filled in too: the user's own
+  // "Monday" or "3pm" is not context the model could know better, and leaving
+  // it out would ask again (seen live: "a haircut on Monday at 11am" came back
+  // without the day). A negated message ("not Monday") is not filled from.
+  const date = reopened.has('date') ? null : readDate(latest, input);
+  const dateCorrected =
+    date !== null && slots.date !== date && (slots.date != null || (input.draft.date !== date && !negates(latest)));
+  if (date && dateCorrected) {
+    events.push({ kind: 'date_corrected', model: slots.date ?? null, deterministic: date });
     slots = { ...slots, date };
   }
 
-  // Unlike a date, a missing time is filled in too: the user's own "3pm" is not
-  // context the model could know better, and leaving it out would ask again.
-  const time = readTime(latest, input);
+  const time = reopened.has('time') ? null : readTime(latest, input);
   const timeCorrected =
-    time?.settled === true && slots.time !== time.time && (slots.time != null || input.draft.time !== time.time);
-  if (time && timeCorrected) {
+    time?.kind === 'clock' &&
+    slots.time !== time.time &&
+    (slots.time != null || (input.draft.time !== time.time && !negates(latest)));
+  if (time?.kind === 'clock' && timeCorrected) {
     events.push({ kind: 'time_corrected', model: slots.time ?? null, deterministic: time.time });
     slots = { ...slots, time: time.time };
+  }
+
+  // Seen live: "Routine checkup" answered with no serviceName at all. A
+  // catalogue name the message spells out in full, not negated, is filled in
+  // like a stated time; anything looser stays the model's call.
+  const named = slots.serviceName ? null : namedService(latest, input);
+  if (named && named !== input.draft.serviceName) {
+    events.push({ kind: 'service_filled', deterministic: named });
+    slots = { ...slots, serviceName: named };
   }
 
   const ungrounded = slots.serviceName && !isGroundedService(slots.serviceName, input) ? slots.serviceName : null;
@@ -106,25 +147,52 @@ export function applyGuardrails(
     slots = rest;
   }
 
-  const draft = mergeSlots(input.draft, slots);
-  if (ungrounded) {
-    // The model's prose was written around a service it invented.
-    return { output: { ...output, slots, reply: composeReply(draft, input) }, events };
+  // Seen live: "Can you confirm the price first?" reported as `confirming`.
+  // Not consent; when it asks about price or length, the catalogue answers
+  // and the summary is repeated after it, as for any aside.
+  if (intent === 'confirming' && (clarification || !isAffirmative(latest))) {
+    events.push({ kind: 'consent_unsupported' });
+    const answer = answerAboutService(latest, mergeSlots(input.draft, slots).serviceName, input.services);
+    intent = answer ? 'other' : 'collecting';
+    if (answer) reply = answer;
   }
 
+  if (clarification) {
+    const model = Object.fromEntries(clarification.fields.filter((f) => slots[f]).map((f) => [f, slots[f]]));
+    events.push({ kind: 'clarification_asked', fields: clarification.fields, model });
+    slots = Object.fromEntries(Object.entries(slots).filter(([key]) => !reopened.has(key as 'date' | 'time')));
+    const draft = withoutClarified(mergeSlots(input.draft, slots), clarification);
+    return {
+      output: { ...output, slots, intent, reply: composeReply(draft, input, clarification), clarify: clarification.fields },
+      events,
+    };
+  }
+
+  const draft = mergeSlots(input.draft, slots);
+  const filledIn = Boolean(named) || (dateCorrected && !output.slots.date) || (timeCorrected && !output.slots.time);
+  if (ungrounded) {
+    // The model's prose was written around a service it invented.
+    return { output: { ...output, slots, intent, reply: composeReply(draft, input) }, events };
+  }
+
+  // With no date in the draft, a reply naming a calendar date is talking about
+  // one nobody stored ("Friday, October 9" while the draft has no day). A reply
+  // written without a detail code filled in may ask for it again ("Which day?").
   const reason = BOOKING_CLAIMS.some((p) => p.test(reply))
     ? 'booking_claim'
-    : draft.date && mentionsOtherDate(reply, draft.date)
+    : (draft.date ? mentionsOtherDate(reply, draft.date) : namesCalendarDate(reply))
       ? 'date_mismatch'
       : timeCorrected && draft.time && mentionsOtherTime(reply, draft.time)
         ? 'time_mismatch'
-        : null;
+        : filledIn
+          ? 'filled_in'
+          : null;
   if (reason) {
     events.push({ kind: 'reply_replaced', reason, reply });
     reply = composeReply(draft, input);
   }
 
-  return { output: { ...output, slots, reply }, events };
+  return { output: { ...output, slots, intent, reply }, events };
 }
 
 /**
@@ -172,6 +240,19 @@ export function mentionsOtherDate(text: string, date: string): boolean {
     if (iso !== date) return true;
   }
   return false;
+}
+
+/** The one catalogue service whose full name the text contains, unless the text is a refusal. */
+function namedService(text: string, input: Pick<ProviderInput, 'services'>): string | null {
+  if (negates(text)) return null;
+  const lower = text.toLowerCase();
+  const named = input.services.filter((s) => lower.includes(s.name.toLowerCase()));
+  return named.length === 1 ? named[0]!.name : null;
+}
+
+/** Does the text name a calendar date ("October 9", "9 Oct", "2026-10-09")? A bare weekday does not count. */
+export function namesCalendarDate(text: string): boolean {
+  return [DAY_MONTH, MONTH_DAY, ISO_DATE].some((pattern) => text.search(pattern) !== -1);
 }
 
 /** Does the text state a clock time other than `time` (HH:MM)? */

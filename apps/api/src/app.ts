@@ -3,6 +3,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express, { type Express } from 'express';
 import helmet from 'helmet';
+import { IDEMPOTENT_REPLAY_HEADER } from '@appt/shared';
 import { env } from './config/env.js';
 import { pool } from './db/pool.js';
 import { errorHandler, notFoundHandler, asyncHandler } from './middleware/errorHandler.js';
@@ -55,7 +56,7 @@ export function createApp(): Express {
         // on, even to an origin it has just refused. Granting it per request
         // keeps the header meaning what it says: only a listed origin has it.
         credentials: origin !== undefined && env.corsOrigins.includes(origin),
-        exposedHeaders: ['X-Request-Id', 'RateLimit', 'RateLimit-Policy', 'Retry-After'],
+        exposedHeaders: ['X-Request-Id', 'RateLimit', 'RateLimit-Policy', 'Retry-After', IDEMPOTENT_REPLAY_HEADER],
       });
     }),
   );

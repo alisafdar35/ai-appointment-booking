@@ -32,6 +32,12 @@ describe('describeAuthError', () => {
     expect(result.message).toContain('in 2 minutes');
   });
 
+  it('reads a 15-minute login lockout in minutes, from Retry-After', () => {
+    const result = describeAuthError(apiError({ code: ERROR_CODES.RATE_LIMITED, status: 429, retryAfterSeconds: 897 }));
+    expect(result).toMatchObject({ tone: 'warning', title: 'Too many attempts' });
+    expect(result.message).toBe('Please wait and try again in 15 minutes.');
+  });
+
   it('explains a network failure instead of showing a raw error', () => {
     const result = describeAuthError(apiError({ code: 'NETWORK', status: 0 }));
     expect(result.title).toBe('Cannot reach Slotly');
