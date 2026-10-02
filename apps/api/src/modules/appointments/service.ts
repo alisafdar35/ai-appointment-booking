@@ -256,4 +256,5 @@ export async function cancelAppointment(
 }
 
 export const listServices = repo.listServices;
+export const listForChatSession = repo.listForChatSession;
 export const matchServiceByName = repo.matchServiceByName;

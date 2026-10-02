@@ -90,13 +90,17 @@ export async function createSession(
  * The draft on the session only describes the conversation's latest state; it
  * cannot say that message 12 carried a confirmation card or which times were
  * offered after a clash. Keeping the turn's outcome on the message is what lets
- * a reloaded transcript render the same controls the live one did. `missing` is
- * kept for debugging and replay; the client derives it from the current draft.
+ * a reloaded transcript render the same controls the live one did, each from
+ * its own draft and booking. `missing` is kept for debugging and replay; the
+ * client derives it from the draft. Rows written before `draft` and
+ * `appointmentId` were recorded simply lack them.
  */
 export interface MessageMeta {
   action: AssistantAction;
   suggestions?: BookingSuggestion[];
   missing: RequiredSlot[];
+  draft?: BookingSlots;
+  appointmentId?: string;
 }
 
 interface MessageRow {
@@ -115,6 +119,8 @@ const toMessageDto = (row: MessageRow): ChatMessageDto => ({
   engine: row.engine,
   action: row.meta?.action ?? null,
   ...(row.meta?.suggestions?.length ? { suggestions: row.meta.suggestions } : {}),
+  ...(row.meta?.draft ? { draft: { ...EMPTY_SLOTS, ...row.meta.draft } } : {}),
+  ...(row.meta?.appointmentId ? { appointmentId: row.meta.appointmentId } : {}),
   createdAt: row.created_at,
 });
 

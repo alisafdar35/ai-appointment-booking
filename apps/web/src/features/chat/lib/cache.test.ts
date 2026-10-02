@@ -2,12 +2,12 @@ import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it } from 'vitest';
 import type { ChatTranscript } from '@/lib/api';
 import { queryKeys } from '@/lib/queries';
-import { COMPLETE_DRAFT, SESSION_ID, message, session, turn } from '../test/factories';
+import { COMPLETE_DRAFT, SESSION_ID, appointment, message, session, turn } from '../test/factories';
 import { mirrorTurnIntoTranscriptCache } from './cache';
 
 const seeded = () => {
   const client = new QueryClient();
-  const transcript: ChatTranscript = { session: session(), messages: [message({ id: '1', role: 'user' })] };
+  const transcript: ChatTranscript = { session: session(), messages: [message({ id: '1', role: 'user' })], appointments: [] };
   client.setQueryData(queryKeys.chat.transcript(SESSION_ID), transcript);
   return client;
 };
@@ -29,10 +29,13 @@ describe('mirrorTurnIntoTranscriptCache', () => {
     expect(read(client).messages).toHaveLength(2);
   });
 
-  it('marks the session completed on a booking', () => {
+  it('marks the session completed on a booking, and keeps the appointment for its receipt', () => {
     const client = seeded();
-    mirrorTurnIntoTranscriptCache(client, turn({ action: 'booked' }));
+    const booked = appointment();
+    mirrorTurnIntoTranscriptCache(client, turn({ action: 'booked', appointment: booked }));
+    mirrorTurnIntoTranscriptCache(client, turn({ action: 'booked', appointment: booked }));
     expect(read(client).session.status).toBe('completed');
+    expect(read(client).appointments).toEqual([booked]);
   });
 
   it('does not invent a cache entry for a conversation that was never loaded', () => {

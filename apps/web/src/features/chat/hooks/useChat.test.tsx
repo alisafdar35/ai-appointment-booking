@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { SOCKET_EVENTS, type AssistantTurnDto } from '@appt/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, chatApi } from '@/lib/api';
-import { COMPLETE_DRAFT, SESSION_ID, message, session, turn } from '../test/factories';
+import { COMPLETE_DRAFT, SESSION_ID, appointment, message, session, turn } from '../test/factories';
 import { useChat } from './useChat';
 
 // The provider needs a socket; the hook only needs to be able to receive pushes.
@@ -29,6 +29,7 @@ const existing = session({ messageCount: 2, lastMessageAt: '2026-10-02T13:00:00.
 const transcript = {
   session: existing,
   messages: [message({ id: '1', role: 'user', content: 'Book a checkup' }), message({ id: '2', role: 'assistant' })],
+  appointments: [],
 };
 
 beforeEach(() => {
@@ -45,6 +46,13 @@ describe('useChat', () => {
     await waitFor(() => expect(result.current.items).toHaveLength(2));
     expect(result.current.activeKey).toBe(SESSION_ID);
     expect(result.current.historyState).toBe('ready');
+  });
+
+  it('exposes the bookings the transcript says the conversation made', async () => {
+    const booked = appointment();
+    vi.mocked(chatApi.getTranscript).mockResolvedValue({ ...transcript, appointments: [booked] });
+    const { result } = setup();
+    await waitFor(() => expect(result.current.appointments).toEqual([booked]));
   });
 
   it('starts a fresh conversation when the latest one is finished', async () => {
@@ -134,6 +142,7 @@ describe('useChat', () => {
     vi.mocked(chatApi.getTranscript).mockResolvedValue({
       session: session({ id: 'brand-new-session' }),
       messages: [message({ id: '8', role: 'user', content: 'hi' }), message({ id: '9', role: 'assistant' })],
+      appointments: [],
     });
     const { result } = setup();
     await waitFor(() => expect(result.current.activeKey).toBe('new'));
@@ -271,7 +280,7 @@ describe('useChat', () => {
     const submit = vi
       .spyOn(chatApi, 'submitDraft')
       .mockResolvedValue(turn({ sessionId: 'fresh', action: 'booked', bookingDraft: COMPLETE_DRAFT, missing: [] }));
-    vi.mocked(chatApi.getTranscript).mockResolvedValue({ session: session({ id: 'fresh', status: 'completed' }), messages: [] });
+    vi.mocked(chatApi.getTranscript).mockResolvedValue({ session: session({ id: 'fresh', status: 'completed' }), messages: [], appointments: [] });
     const { result } = setup();
     await waitFor(() => expect(result.current.activeKey).toBe('new'));
 
@@ -307,7 +316,7 @@ describe('useChat', () => {
     vi.mocked(chatApi.listSessions).mockResolvedValue([existing, other]);
     vi.mocked(chatApi.getTranscript).mockImplementation(async (id) =>
       id === 'other-session'
-        ? { session: other, messages: [message({ id: '20', role: 'user', content: 'In the other one' })] }
+        ? { session: other, messages: [message({ id: '20', role: 'user', content: 'In the other one' })], appointments: [] }
         : transcript,
     );
     const { result } = setup();

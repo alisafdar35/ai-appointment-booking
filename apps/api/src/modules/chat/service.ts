@@ -5,8 +5,8 @@ import {
   type AssistantAction,
   type AssistantTurnDto,
   type BookingSlots,
-  type ChatMessageDto,
   type ChatSessionDto,
+  type ChatTranscriptDto,
   type RequiredSlot,
   type SendMessageInput,
   type ServiceDto,
@@ -51,14 +51,22 @@ export async function listSessions(ctx: { businessId: string; userId: string }) 
   return repo.listSessions(ctx.businessId, ctx.userId);
 }
 
+/**
+ * A conversation, its messages, and the bookings it made. The bookings come
+ * with it so a receipt in the transcript shows the row as it stands now,
+ * wherever it falls — not only when it happens to be in a list the page loaded.
+ */
 export async function getTranscript(
   ctx: { businessId: string; userId: string },
   sessionId: string,
-): Promise<{ session: ChatSessionDto; messages: ChatMessageDto[] }> {
+): Promise<ChatTranscriptDto> {
   const session = await repo.findSession(ctx.businessId, ctx.userId, sessionId);
   if (!session) throw notFound('Conversation');
-  const messages = await repo.listMessages(ctx.businessId, ctx.userId, sessionId);
-  return { session, messages };
+  const [messages, booked] = await Promise.all([
+    repo.listMessages(ctx.businessId, ctx.userId, sessionId),
+    appointments.listForChatSession(ctx, sessionId),
+  ]);
+  return { session, messages, appointments: booked };
 }
 
 export async function createSession(ctx: { businessId: string; userId: string }) {
@@ -279,7 +287,13 @@ export async function handleUserMessage(
       // The raw extraction is kept so a conversation can be debugged — or
       // replayed — without calling the provider again.
       toolCalls: [{ name: 'respond_to_booking_request', arguments: turn.slots, intent: turn.intent }],
-      meta: { action, missing, ...(suggestions ? { suggestions } : {}) },
+      meta: {
+        action,
+        missing,
+        draft,
+        ...(suggestions ? { suggestions } : {}),
+        ...(appointment ? { appointmentId: appointment.id } : {}),
+      },
     });
     await repo.updateDraft(client, session.id, draft);
     return saved;
@@ -363,7 +377,13 @@ export async function submitDraft(
       role: 'assistant',
       content: result.ok ? `Booked — ${resolution.service.name} on ${when}.` : result.message,
       engine: 'system',
-      meta: { action, missing, ...(suggestions ? { suggestions } : {}) },
+      meta: {
+        action,
+        missing,
+        draft: resulting,
+        ...(suggestions ? { suggestions } : {}),
+        ...(result.ok ? { appointmentId: result.appointment.id } : {}),
+      },
     });
     await repo.updateDraft(client, sessionId, resulting);
     if (result.ok) {

@@ -70,12 +70,12 @@ Short ADRs: the context, the decision, the alternatives considered, and what it 
 ## ADR-010: Guardrails verify model output where code is reliable
 
 **Context.** Against the live model, a well-formed answer was still wrong: "next Wednesday" came back as a Thursday, and replies claimed bookings that did not exist.
-**Decision.** Post-checks in `guardrails.ts`. A confidently parsed date from the same message overrides the model's date. A reply claiming a booking, or naming a different day, is replaced with the code-composed question. Each correction is logged in `ai_interaction_logs.guardrails`.
-**Cost.** False positives replace natural wording with a template, the right trade when a false negative tells someone they have an appointment they do not. Times are not yet cross-checked.
+**Decision.** Post-checks in `guardrails.ts`. A confidently parsed date or time from the same message overrides the model's. A service the user never named (and the draft does not hold) is dropped. A reply claiming a booking, naming a different day, naming the time just corrected, or built around a dropped service is replaced with the code-composed question. Each correction is logged in `ai_interaction_logs.guardrails`.
+**Cost.** False positives replace natural wording with a template, the right trade when a false negative tells someone they have an appointment they do not. Grounding also rejects a correct inference from a description ("my teeth are yellow" → whitening); the user is asked to pick instead.
 
 ## ADR-011: Conversation memory lives in the database
 
-**Decision.** `chat_sessions.booking_draft` is the memory. It is restated in each prompt, merged field by field (an absent field is not a cleared field), and returned in every turn. History sent to the model is capped at `AI_HISTORY_TURNS`. Each assistant message stores its `action`/`suggestions` (`meta`) so a reload restores the UI.
+**Decision.** `chat_sessions.booking_draft` is the memory. It is restated in each prompt, merged field by field (an absent field is not a cleared field), and returned in every turn. History sent to the model is capped at `AI_HISTORY_TURNS`. Each assistant message stores its `action`, `suggestions`, a `draft` snapshot and, when it booked, the `appointmentId` (`meta`), so a reload rebuilds every card from its own message.
 **Cost.** A merge policy to get right, which is covered by shared unit tests.
 
 ## ADR-012: Socket.IO is an enhancement over REST, with user and business rooms

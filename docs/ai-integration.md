@@ -19,7 +19,7 @@ interface AiProvider {
 |---|---|
 | [`index.ts`](../apps/api/src/modules/ai/index.ts) | Orchestrator `generateAssistantTurn`: try Mistral, apply guardrails, fall back on any failure, log every call |
 | [`mistral.ts`](../apps/api/src/modules/ai/mistral.ts) | `fetch` against `/v1/chat/completions`. No SDK, so timeout, retry and `Retry-After` handling are explicit |
-| [`fallback.ts`](../apps/api/src/modules/ai/fallback.ts) | Deterministic provider: chrono-node dates and times, catalogue matching, confirmation patterns, templated replies |
+| [`fallback.ts`](../apps/api/src/modules/ai/fallback.ts) | Deterministic provider: chrono-node dates and times, catalogue matching, confirmation patterns, templated replies. Its `readDate`, `readTime` and `matchService` double as the guardrails' cross-checks |
 | [`guardrails.ts`](../apps/api/src/modules/ai/guardrails.ts) | Post-checks a well-formed model answer against what code can verify |
 | [`tools.ts`](../apps/api/src/modules/ai/tools.ts) | Tool definition generated from the shared zod schema, plus a lenient-but-strict parser |
 | [`prompts.ts`](../apps/api/src/modules/ai/prompts.ts) | System prompt built per request |
@@ -61,7 +61,7 @@ Memory is **server-side state, not transcript recall**:
 1. `chat_sessions.booking_draft` holds `{ serviceName, date, time, notes }`.
 2. Each turn, the prompt restates the draft and the last `AI_HISTORY_TURNS` (default 12) messages, oldest first (`recentTurns`).
 3. The provider returns only what this message said. `mergeSlots` (shared) overlays it: **an absent or null field means "not mentioned", never "cleared"**, so "actually make it 4pm" keeps the service and day.
-4. The merged draft is stored with the assistant message, so a reload, a second tab or a switch to the fallback engine continues where the conversation left off.
+4. The merged draft is stored on the session, so a reload, a second tab or a switch to the fallback engine continues where the conversation left off. A snapshot of it is also stored in each assistant message's `meta` (with the `appointmentId` on a booked turn), so every earlier card in a reloaded transcript is rebuilt from its own details.
 
 ## Guardrails
 
@@ -76,17 +76,19 @@ These are listed in the order a turn meets them.
 | 5 | **Forced tool call.** A prose answer with no tool call becomes `invalid_output`, and the turn falls back | `mistral.ts` |
 | 6 | **Schema validation.** Arguments are parsed through zod; `"null"`/`""` noise is normalised; a bad date or time becomes `invalid_output` | `tools.ts` `parseAssistantArgs` |
 | 7 | **Date cross-check.** If chrono-node confidently reads a date from the same message and the model's differs, chrono wins (`date_corrected`). Context-dependent dates such as "the 12th" are not overruled. Seen live: "next Wednesday" resolved by the model to 2026-10-08 (a Thursday), corrected to 2026-10-07 | `guardrails.ts` |
-| 8 | **Reply replacement.** A reply that claims a booking was made, or names a weekday or date other than the draft's, is replaced with the code-composed question (`reply_replaced`, reason `booking_claim` / `date_mismatch`) | `guardrails.ts` |
-| 9 | **Service resolution in SQL.** Exact match, then ranked containment with `strpos` (not `LIKE`, so `%` is not a wildcard). Several best matches lead to "Did you mean A or B?"; none leads to "We don't offer that. We have: …" | `chat/service.ts` `resolveService`, `appointments/repository.matchServiceByName` |
-| 10 | **Consent rule.** A booking is attempted only when (a) the stored draft was **already complete**, so a confirmation card was on screen, (b) this turn changed none of service, date or time, and (c) intent is `confirming`. In the deterministic engine a negation check runs before consent, so "don't book it", "wait" or "hold off" never book. "Book a checkup tomorrow at 2" therefore shows a summary first, and "yes, but make it 4pm" re-confirms | `chat/service.ts` |
-| 11 | **Code-worded confirmation.** The last sentence before consent is built from the resolved slots, never from model prose | `copy.ts` |
-| 12 | **Booking rules in one service, plus DB constraints.** Past, outside hours, off the 30-minute grid, taken, customer already busy at that time, inactive service; races resolved by two `EXCLUDE` constraints | `appointments/service.ts`, `availability.ts` |
-| 13 | **Refusals are composed by code.** "That slot is already booked. I could do 2:30 PM, or 3:30 PM — which works?" Suggestions come from the availability query, and the rejected field is cleared from the draft | `chat/service.ts` `clearRejected` |
-| 14 | **needs_form escalation.** After 4 turns in a row with no progress (the same details still missing, no times offered), the turn becomes `needs_form` and the UI offers the structured form pre-filled from the draft. It is offered at most once per conversation | `chat/service.ts` `STALLED_TURN_THRESHOLD` |
-| 15 | **Bounded latency.** `AbortSignal.timeout(AI_TIMEOUT_MS)` per attempt; retry only 408/429/5xx/network, with jittered backoff; a 429 `Retry-After` is obeyed only if the wait plus one attempt fits the budget `AI_TIMEOUT_MS × (AI_MAX_RETRIES + 1)`; 401/403 are never retried and are logged at error level as `auth_error` | `mistral.ts` |
-| 16 | **Transparency.** Every turn reports `engine`; the UI labels non-LLM replies "Guided mode" and shows a one-time notice | `EngineBadge`, `EngineNotice` |
+| 8 | **Time cross-check.** If the same message settles a time on its own (explicit am/pm, 24-hour, noon, or a part of the day such as "afternoon around 3"), that reading replaces a different or missing model time (`time_corrected`). An hour whose AM/PM code would only guess from opening hours ("at 10", "around 8") is not overruled. If the model's reply names the time it got wrong, the reply is replaced too (`reply_replaced`, reason `time_mismatch`) | `guardrails.ts`, `fallback.readTime` |
+| 9 | **Service grounding.** A model-supplied `serviceName` is kept only if the draft already holds it, or a user message the model was shown names it (the fallback's own `matchService`, so aliases like "check up" count but an ambiguous "teeth" does not). Otherwise the draft keeps its previous service, the reply becomes the code-composed question (which asks for the service), and `service_ungrounded` is logged. Seen live: the model answered "whenever" with `serviceName: "Routine Checkup"`. A name outside the catalogue that the user did say is kept, so row 11 can answer "We don't offer that" | `guardrails.ts` `isGroundedService` |
+| 10 | **Reply replacement.** A reply that claims a booking was made, or names a weekday or date other than the draft's, is replaced with the code-composed question (`reply_replaced`, reason `booking_claim` / `date_mismatch`) | `guardrails.ts` |
+| 11 | **Service resolution in SQL.** Exact match, then ranked containment with `strpos` (not `LIKE`, so `%` is not a wildcard). Several best matches lead to "Did you mean A or B?"; none leads to "We don't offer that. We have: …" | `chat/service.ts` `resolveService`, `appointments/repository.matchServiceByName` |
+| 12 | **Consent rule.** A booking is attempted only when (a) the stored draft was **already complete**, so a confirmation card was on screen, (b) this turn changed none of service, date or time, and (c) intent is `confirming`. In the deterministic engine a negation check runs before consent, so "don't book it", "wait" or "hold off" never book. "Book a checkup tomorrow at 2" therefore shows a summary first, and "yes, but make it 4pm" re-confirms | `chat/service.ts` |
+| 13 | **Code-worded confirmation.** The last sentence before consent is built from the resolved slots, never from model prose | `copy.ts` |
+| 14 | **Booking rules in one service, plus DB constraints.** Past, outside hours, off the 30-minute grid, taken, customer already busy at that time, inactive service; races resolved by two `EXCLUDE` constraints | `appointments/service.ts`, `availability.ts` |
+| 15 | **Refusals are composed by code.** "That slot is already booked. I could do 2:30 PM, or 3:30 PM — which works?" Suggestions come from the availability query, and the rejected field is cleared from the draft | `chat/service.ts` `clearRejected` |
+| 16 | **needs_form escalation.** After 4 turns in a row with no progress (the same details still missing, no times offered), the turn becomes `needs_form` and the UI offers the structured form pre-filled from the draft. It is offered at most once per conversation | `chat/service.ts` `STALLED_TURN_THRESHOLD` |
+| 17 | **Bounded latency.** `AbortSignal.timeout(AI_TIMEOUT_MS)` per attempt; retry only 408/429/5xx/network, with jittered backoff; a 429 `Retry-After` is obeyed only if the wait plus one attempt fits the budget `AI_TIMEOUT_MS × (AI_MAX_RETRIES + 1)`; 401/403 are never retried and are logged at error level as `auth_error` | `mistral.ts` |
+| 18 | **Transparency.** Every turn reports `engine`; the UI labels non-LLM replies "Guided mode" and shows a one-time notice | `EngineBadge`, `EngineNotice` |
 
-**Gap, stated honestly:** the model's **time** is validated for format, and the booking service checks it against business hours, but code does not re-derive it the way it re-derives dates. The deterministic engine's AM/PM rules (below) are not yet applied as a cross-check on model output.
+**Asymmetry:** a date the model left out is not added, but a settled time is. Filling in the time only ever adds what the user said, unambiguously, in the very message being answered; the date rule predates it and is unchanged.
 
 ## The deterministic engine
 
@@ -109,7 +111,7 @@ These are listed in the order a turn meets them.
 | `outcome` | `ok · timeout · rate_limited · auth_error · invalid_output · provider_error` |
 | `error_message` | `Mistral responded 401: …` (truncated) |
 | `extracted_slots` | `{"serviceName":"Teeth Whitening","date":"2026-10-07"}` |
-| `guardrails` | `[{"kind":"date_corrected","model":"2026-10-08","deterministic":"2026-10-07"}]` |
+| `guardrails` | `[{"kind":"date_corrected","model":"2026-10-08","deterministic":"2026-10-07"}]`; also `time_corrected`, `service_ungrounded`, `reply_replaced` |
 | `request_id`, `session_id`, `business_id` | correlate with access logs and the transcript |
 
 After a Mistral failure two rows are written: the failed call and the fallback that served the turn. The assistant message also stores the raw extraction in `chat_messages.tool_calls`, so a conversation can be replayed without calling the provider again. Pino also logs guardrail corrections and failures with the request id.
@@ -144,6 +146,8 @@ WHERE provider = 'mistral' GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
 | Prose instead of a tool call | no `tool_calls` | Guided reply (the deterministic engine reads the same message) | `invalid_output` |
 | Malformed arguments (bad date, wrong type) | zod | Guided reply | `invalid_output` |
 | Wrong weekday arithmetic | chrono cross-check | Correct date in draft and confirmation | `ok` + `guardrails` |
+| Wrong or dropped stated time ("afternoon around 3" read as 14:00) | `readTime` cross-check | Correct time in draft and confirmation | `ok` + `guardrails` (`time_corrected`) |
+| Invents a service the user never named | grounding against user messages and the draft | Previous service kept; "Which service would you like?" | `ok` + `guardrails` (`service_ungrounded`) |
 | Claims "you're booked" | regex | Code-composed question | `ok` + `guardrails` |
 | Unknown or ambiguous service | SQL resolution | "We don't offer that…" / "Did you mean…" | — |
 | Conversation not converging | 4 turns in a row with no progress | `needs_form` card pre-filled from the draft | — |
@@ -170,7 +174,7 @@ Nothing in chat, booking, persistence or the web app changes. They depend on `Pr
 
 ## How to evaluate it
 
-- **Unit tests:** `test/unit/guardrails.test.ts`, `fallback.test.ts`, `tools.test.ts`, covering date correction, booking-claim and date-mismatch detection, AM/PM rules, ordinal days, vague ranges and argument parsing.
-- **Provider behaviour over real HTTP:** `test/integration/ai-mistral.test.ts` drives the real `MistralProvider` against a scripted chat-completions stub ([`helpers/mistralStub.ts`](../apps/api/test/helpers/mistralStub.ts)). It covers success, retries, `Retry-After` inside and outside the budget, 401 without retry, prose without a tool call, malformed arguments, fallback and log rows.
+- **Unit tests:** `test/unit/guardrails.test.ts`, `fallback.test.ts`, `tools.test.ts`, covering date and time correction (and when neither overrules the model), service grounding, booking-claim, date- and time-mismatch detection, AM/PM rules, ordinal days, vague ranges and argument parsing.
+- **Provider behaviour over real HTTP:** `test/integration/ai-mistral.test.ts` drives the real `MistralProvider` against a scripted chat-completions stub ([`helpers/mistralStub.ts`](../apps/api/test/helpers/mistralStub.ts)). It covers success, retries, `Retry-After` inside and outside the budget, 401 without retry, prose without a tool call, malformed arguments, the date, time and service guardrails end to end, fallback and log rows.
 - **Conversation flows:** `test/integration/chat.test.ts` on the deterministic engine, covering consent, closed sessions, escalation, suggestions and the draft form.
 - **Online:** watch the fallback rate, `invalid_output` rate and `guardrails` frequency in `ai_interaction_logs`. Each correction is a labelled failure case. Exporting `chat_messages` (user text) with the corrected slots gives a regression set to replay against a new model or prompt before switching.

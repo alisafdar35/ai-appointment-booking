@@ -2,7 +2,14 @@
 
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { EMPTY_SLOTS, ERROR_CODES, SOCKET_EVENTS, type AssistantTurnDto, type BookingSlots } from '@appt/shared';
+import {
+  EMPTY_SLOTS,
+  ERROR_CODES,
+  SOCKET_EVENTS,
+  type AppointmentDto,
+  type AssistantTurnDto,
+  type BookingSlots,
+} from '@appt/shared';
 import { hasErrorCode } from '@/lib/api';
 import {
   applyAssistantTurn,
@@ -32,6 +39,7 @@ const REMOTE_TYPING_TIMEOUT_MS = 15_000;
 
 const NO_ITEMS: ChatItem[] = [];
 const NO_TURNS: Record<string, TurnMeta> = {};
+const NO_APPOINTMENTS: AppointmentDto[] = [];
 
 const newClientId = () => `local-${crypto.randomUUID()}`;
 
@@ -263,6 +271,8 @@ export function useChat() {
     sessionId,
     items,
     turns: active?.turns ?? NO_TURNS,
+    /** The conversation's bookings still going ahead, from its transcript: what a booked card shows after a reload. */
+    appointments: transcript.data?.appointments ?? NO_APPOINTMENTS,
     draft: active?.draft ?? EMPTY_SLOTS,
     sessionStatus: active?.status ?? 'active',
     isSending,

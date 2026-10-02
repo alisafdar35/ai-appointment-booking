@@ -1,6 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query';
 import { listAppointmentsSchema, type AppointmentDto } from '@appt/shared';
-import type { AppointmentFilters } from '@/lib/api';
+import type { AppointmentFilters, ChatTranscript } from '@/lib/api';
 import { queryKeys, type AppointmentListKey } from './keys';
 
 /**
@@ -64,13 +64,33 @@ export function placeAppointmentInCaches(queryClient: QueryClient, appointment: 
 }
 
 /**
+ * A transcript's bookings with `appointment` folded in, kept as the server
+ * serves them: only the ones still going ahead, oldest first.
+ */
+export function withTranscriptAppointment(transcript: ChatTranscript, appointment: AppointmentDto): ChatTranscript {
+  const others = transcript.appointments.filter((item) => item.id !== appointment.id);
+  const appointments =
+    appointment.status === 'cancelled'
+      ? others
+      : [...others, appointment].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  return { ...transcript, appointments };
+}
+
+/**
  * Fold a server-confirmed appointment into every cache that can show it: each
- * cached list, and (by invalidation) the availability grid for its service, since its slot just became taken or free.
+ * cached list, the transcript of the conversation that booked it (so its
+ * receipt follows a cancellation made elsewhere), and (by invalidation) the
+ * availability grid for its service, since its slot just became taken or free.
  *
  * Idempotent by id. That matters because the socket echoes an event back to the
  * tab that caused it, so the same appointment routinely arrives twice.
  */
 export function upsertAppointmentInCaches(queryClient: QueryClient, appointment: AppointmentDto): void {
   placeAppointmentInCaches(queryClient, appointment);
+  if (appointment.chatSessionId) {
+    queryClient.setQueryData<ChatTranscript>(queryKeys.chat.transcript(appointment.chatSessionId), (transcript) =>
+      transcript ? withTranscriptAppointment(transcript, appointment) : transcript,
+    );
+  }
   void queryClient.invalidateQueries({ queryKey: queryKeys.availability.forService(appointment.service.id) });
 }

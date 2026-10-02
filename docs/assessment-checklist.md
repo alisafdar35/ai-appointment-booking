@@ -2,7 +2,7 @@
 
 Every requirement line in the brief, with its status and the evidence. **Done** means implemented and covered by tests or manual verification. **Partial** and **Not yet** are explained.
 
-Test counts are from the latest local run: API 559 passing (22 files), web 425 passing (39 files). The e2e suite has 50 tests (25 scenarios × 2 viewports), run locally against a live stack: 50/50 on one run, but on a development database already holding hundreds of e2e bookings, parallel specs occasionally collide on the same free slot (see the README's known limitations).
+Test counts are from the latest local run: API 589 passing (22 files), web 439 passing (39 files). The e2e suite has 50 tests (25 scenarios × 2 viewports), run locally against a live stack: 50/50 on one run, but on a development database already holding hundreds of e2e bookings, parallel specs occasionally collide on the same free slot (see the README's known limitations).
 
 ## Submission
 
@@ -66,7 +66,7 @@ Test counts are from the latest local run: API 559 passing (22 files), web 425 p
 | *Eval:* API clarity and consistency | Done | One envelope and stable codes; named action for cancel |
 | *Eval:* security awareness | Done | httpOnly cookies, refresh rotation with reuse detection, Origin check (CSRF), helmet, constant-time login miss, bcrypt 72-byte rule, pinned JWT algorithm, tenant-scoped queries, open-redirect-safe `next`. Limitations listed in the README |
 | *Eval:* separation of concerns, service boundaries | Done | routes / services / repositories / ai ([architecture.md § Service boundaries](architecture.md#service-boundaries)) |
-| *Eval:* code organization and maintainability | Done | Module-per-domain; 559 API tests |
+| *Eval:* code organization and maintainability | Done | Module-per-domain; 589 API tests |
 
 ## 3. AI integration service
 
@@ -79,7 +79,7 @@ Test counts are from the latest local run: API 559 passing (22 files), web 425 p
 | Fallback to structured forms if input is incomplete or ambiguous | Done | `needs_form` after 4 turns in a row with no progress (at most once per conversation); always-available "Prefer a form?"; ambiguous services asked back ([chat/service.ts](../apps/api/src/modules/chat/service.ts)) · [screenshot](screenshots/assistant-fallback-form.png) |
 | Log AI interactions (console or DB) | Done (both) | `ai_interaction_logs` table + pino ([logs.ts](../apps/api/src/modules/ai/logs.ts)); per-tenant summary at the owner-only `GET /api/ai/summary` |
 | *Eval:* practical AI usage | Done | One call per turn, small model, code-written confirmations |
-| *Eval:* error handling and guardrails | Done (partial on one point) | 16 guardrails ([ai-integration.md § Guardrails](ai-integration.md#guardrails)); deterministic fallback. **Partial:** model *times* are not cross-checked by code the way dates are |
+| *Eval:* error handling and guardrails | Done | 18 guardrails ([ai-integration.md § Guardrails](ai-integration.md#guardrails)), including date and time cross-checks and service grounding; deterministic fallback |
 | *Eval:* clear boundaries between AI calls and business logic | Done | `AiProvider` seam; the AI module cannot write appointments ([ADR-008](decisions.md#adr-008-the-llm-extracts-code-decides)) |
 
 ## 4. Database design
@@ -107,4 +107,4 @@ Test counts are from the latest local run: API 559 passing (22 files), web 425 p
 | Quality of UI implementation and usability | [frontend.md](frontend.md), [screenshots](screenshots), Playwright specs |
 | Realistic use of AI in a product workflow | [ai-integration.md](ai-integration.md) |
 | Ability to explain and defend tradeoffs | ADRs, each with "Alternatives" and "Cost" |
-| Testing (not asked; included) | 559 API + 425 web + 50 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e not in CI) |
+| Testing (not asked; included) | 589 API + 439 web + 50 e2e tests; [CI workflow](../.github/workflows/ci.yml) (e2e not in CI) |

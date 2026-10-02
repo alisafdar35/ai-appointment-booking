@@ -37,7 +37,7 @@ chatRouter.post(
   }),
 );
 
-/** GET /api/chat/sessions/:id — the session plus its transcript. */
+/** GET /api/chat/sessions/:id — the session, its transcript, and the bookings it made. */
 chatRouter.get(
   '/sessions/:id',
   validate(z.object({ id: z.string().uuid() }), 'params'),

@@ -1,17 +1,15 @@
 import type { ServiceDto } from '@appt/shared';
 import { useMemo } from 'react';
 import { groupItems } from '../lib/grouping';
-import { liveItemKey } from '../lib/turn-meta';
-import type { ChatItem, TurnMeta } from '../lib/reducer';
+import { liveItemKey, turnMetaFor, type TurnContext } from '../lib/turn-meta';
+import type { ChatItem } from '../lib/reducer';
 import { MessageGroup } from './MessageGroup';
 import type { MessageView, TurnActions } from './TurnCard';
 
 interface MessageListProps {
   items: ChatItem[];
-  /** Turn payloads this tab has seen, by assistant message id. */
-  turns: Record<string, TurnMeta>;
-  /** What to render for the newest assistant message when `turns` has no entry for it (e.g. after a reload). */
-  restoredMeta: TurnMeta | null;
+  /** What each assistant message's card is rebuilt from when this tab did not receive its turn. */
+  context: TurnContext;
   services: readonly ServiceDto[];
   timeZone: string;
   actions: TurnActions;
@@ -23,14 +21,13 @@ interface MessageListProps {
  * hears each new message without being interrupted mid-sentence, and only
  * additions are announced (not the retry/sent status churn on older bubbles).
  */
-export function MessageList({ items, turns, restoredMeta, services, timeZone, actions, onRetry }: MessageListProps) {
+export function MessageList({ items, context, services, timeZone, actions, onRetry }: MessageListProps) {
   const blocks = useMemo(() => groupItems(items, timeZone), [items, timeZone]);
   const liveKey = liveItemKey(items);
 
   const viewOf = (item: ChatItem): MessageView => {
     const live = item.key === liveKey;
-    const recorded = item.id ? turns[item.id] : undefined;
-    return { item, live, meta: recorded ?? (live ? restoredMeta : null) };
+    return { item, live, meta: turnMetaFor(item, live, context) };
   };
 
   return (

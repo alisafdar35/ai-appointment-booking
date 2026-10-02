@@ -232,6 +232,17 @@ describe('hydrating from the transcript', () => {
     expect(current.hydrated).toBe(true);
   });
 
+  it('keeps the draft and booking recorded with each reply, for rebuilding its card', () => {
+    const reply = message({ id: '2', role: 'assistant', action: 'booked', draft: COMPLETE_DRAFT, appointmentId: 'appt-1' });
+    const fresh = run([{ type: 'hydrate', session: session(), messages: [serverMessages[0]!, reply] }]);
+    expect(fresh.sessions[SESSION_ID]!.items[1]).toMatchObject({ draft: COMPLETE_DRAFT, appointmentId: 'appt-1' });
+
+    const known = run([{ type: 'hydrate', session: session(), messages: [serverMessages[0]!, reply] }], run([
+      { type: 'hydrate', session: session(), messages: serverMessages },
+    ]));
+    expect(known.sessions[SESSION_ID]!.items[1]).toMatchObject({ draft: COMPLETE_DRAFT, appointmentId: 'appt-1' });
+  });
+
   it('drops system and tool rows', () => {
     const state = run([
       { type: 'hydrate', session: session(), messages: [...serverMessages, message({ id: '3', role: 'tool' })] },

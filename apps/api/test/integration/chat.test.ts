@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import type { AssistantTurnDto, ChatMessageDto, ChatSessionDto } from '@appt/shared';
+import type { AssistantTurnDto, ChatSessionDto, ChatTranscriptDto } from '@appt/shared';
 import { assertApiError, eventually, isUuid } from '../helpers/assertions.js';
 import { book, instant } from '../helpers/booking.js';
 import { SEED, addDays, freshDate, futureDate } from '../helpers/fixtures.js';
@@ -8,7 +8,7 @@ import { startTestApp, type TestApp } from '../helpers/testApp.js';
 import type { ApiClient, ApiResponse } from '../helpers/apiClient.js';
 import { shortDate } from '../../src/lib/time.js';
 
-type Transcript = { session: ChatSessionDto; messages: ChatMessageDto[] };
+type Transcript = ChatTranscriptDto;
 
 /**
  * End-to-end conversations on the deterministic engine (no MISTRAL_API_KEY),
@@ -703,6 +703,79 @@ describe('chat', () => {
 
       const { rows } = await app.db.query(`SELECT meta FROM chat_messages WHERE id = $1`, [t2.message.id]);
       assert.deepEqual(rows[0].meta.missing, ['time']);
+    });
+
+    it('stores each assistant message’s own draft, so an older summary is rebuilt from what it showed', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      const t2 = await turn(customer, 'make it 11am', t1.sessionId);
+      assert.equal(t2.action, 'confirm');
+
+      const { body } = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+      const [first, second] = body.messages.filter((m) => m.role === 'assistant');
+      assert.deepEqual(first!.draft, { serviceName: 'Routine Checkup', date, time: '10:00', notes: null });
+      assert.deepEqual(second!.draft, t2.bookingDraft);
+      assert.equal(second!.draft!.time, '11:00');
+      assert.deepEqual(second, t2.message, 'the live turn carries the same snapshot');
+      assert.equal(body.messages[0]!.draft, undefined, 'user messages carry none');
+      assert.deepEqual(body.appointments, [], 'nothing booked yet');
+    });
+
+    it('returns the booking a conversation made, linked from its booked message', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      const t2 = await turn(customer, 'yes', t1.sessionId);
+      assert.equal(t2.action, 'booked');
+      assert.equal(t2.message.appointmentId, t2.appointment!.id);
+
+      const { body } = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+      assert.deepEqual(body.appointments, [t2.appointment]);
+      assert.equal(body.messages.at(-1)!.appointmentId, t2.appointment!.id);
+      assert.deepEqual(body.messages.at(-1)!.draft, t2.bookingDraft);
+    });
+
+    it('returns a staff member’s own chat booking, and a booking from the form, whenever they fall', async () => {
+      const session = (await staff.post<{ session: ChatSessionDto }>('/api/chat/sessions')).body.session;
+      const date = freshDate();
+      const res = await staff.post<AssistantTurnDto>('/api/chat/draft', {
+        sessionId: session.id,
+        slots: { serviceName: 'Teeth Whitening', date, time: '11:00' },
+      });
+      assert.equal(res.body.action, 'booked');
+
+      const { body } = await staff.get<Transcript>(`/api/chat/sessions/${session.id}`);
+      assert.deepEqual(body.appointments.map((a) => a.id), [res.body.appointment!.id]);
+      assert.equal(body.messages.at(-1)!.appointmentId, res.body.appointment!.id);
+      assert.deepEqual(body.messages.at(-1)!.draft, { serviceName: 'Teeth Whitening', date, time: '11:00', notes: null });
+    });
+
+    it('leaves out a cancelled booking, and anyone else’s row that points at the conversation', async () => {
+      const date = freshDate();
+      const t1 = await turn(customer, `routine checkup on ${date} at 10am`);
+      const t2 = await turn(customer, 'yes', t1.sessionId);
+      const other = await book(staff, { date: freshDate(), time: '15:00' });
+      await app.db.query('UPDATE appointments SET chat_session_id = $1 WHERE id = $2', [
+        t1.sessionId,
+        other.body.appointment.id,
+      ]);
+
+      const before = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+      assert.deepEqual(before.body.appointments.map((a) => a.id), [t2.appointment!.id], 'only the conversation owner’s row');
+
+      assert.equal((await customer.post(`/api/appointments/${t2.appointment!.id}/cancel`, {})).status, 200);
+      const after = await customer.get<Transcript>(`/api/chat/sessions/${t1.sessionId}`);
+      assert.deepEqual(after.body.appointments, []);
+      assert.equal(after.body.messages.at(-1)!.appointmentId, t2.appointment!.id, 'the message still says what it booked');
+    });
+
+    it('serves a message stored before drafts were recorded without one', async () => {
+      const t = await turn(customer, 'routine checkup please');
+      await app.db.query(`UPDATE chat_messages SET meta = meta - 'draft' WHERE id = $1`, [t.message.id]);
+      const { body } = await customer.get<Transcript>(`/api/chat/sessions/${t.sessionId}`);
+      const last = body.messages.at(-1)!;
+      assert.equal(last.action, 'collect_info');
+      assert.equal('draft' in last, false);
+      assert.equal('appointmentId' in last, false);
     });
 
     it('restores no controls for a message stored before outcomes were recorded', async () => {

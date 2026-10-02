@@ -424,7 +424,8 @@ describe('chat with the Mistral engine', () => {
     it('cannot match every service with a SQL wildcard', async () => {
       for (const wildcard of ['%', '_', 'Routine%', '%ing%']) {
         stub.enqueue(tool({ reply: 'ok', intent: 'collecting', serviceName: wildcard, date: freshDate(), time: '10:00' }));
-        const t = await turn('anything at all');
+        // Named by the user, so the name gets past grounding and reaches the SQL match.
+        const t = await turn(`I'd like ${wildcard}`);
         assert.equal(t.bookingDraft.serviceName, null, `"${wildcard}" must not resolve to a service`);
         assert.match(t.message.content, /We don't offer that/);
       }
@@ -432,7 +433,7 @@ describe('chat with the Mistral engine', () => {
 
     it('cannot reach another business’s catalogue', async () => {
       stub.enqueue(tool({ reply: 'ok', intent: 'collecting', serviceName: 'General Practice', date: freshDate(), time: '10:00' }));
-      const t = await turn('a GP appointment please');
+      const t = await turn('a general practice appointment please');
       assert.equal(t.bookingDraft.serviceName, null);
       assert.match(t.message.content, /We don't offer that/);
     });
@@ -597,6 +598,83 @@ describe('chat with the Mistral engine', () => {
       stub.enqueue(tool({ reply: 'And what time?', intent: 'collecting', serviceName: 'Routine Checkup', date }));
       const t = await turn('a checkup on the 14th');
       assert.equal(t.bookingDraft.date, date);
+    });
+  });
+
+  describe('a model that reads a stated time wrongly', () => {
+    it('is overruled by the time the message settles, and the log says so', async () => {
+      const date = freshDate();
+      stub.enqueue(tool({ reply: 'And which day?', intent: 'collecting', serviceName: 'Routine Checkup', time: '14:00' }));
+      const t1 = await turn('routine checkup please, afternoon around 3');
+
+      assert.equal(t1.bookingDraft.time, '15:00');
+      assert.equal(t1.engine, 'mistral');
+      const [row] = await logsFor(t1.sessionId, 1);
+      assert.equal(row.extracted_slots.time, '15:00', 'the log shows what the draft received');
+      assert.deepEqual(row.guardrails, [{ kind: 'time_corrected', model: '14:00', deterministic: '15:00' }]);
+
+      // A later turn that leaves the time out keeps the corrected one.
+      stub.enqueue(tool({ reply: 'Shall I book it?', intent: 'collecting', date }));
+      const t2 = await turn(`${date} then`, t1.sessionId);
+      assert.equal(t2.action, 'confirm');
+      assert.match(t2.message.content, /at 3:00 PM\. Shall I book it\?/);
+    });
+
+    it('has a time it dropped filled in from the message', async () => {
+      stub.enqueue(tool({ reply: 'Which day?', intent: 'collecting', serviceName: 'Teeth Whitening' }));
+      const t = await turn('teeth whitening at 4:30pm');
+      assert.equal(t.bookingDraft.time, '16:30');
+      const [row] = await logsFor(t.sessionId, 1);
+      assert.deepEqual(row.guardrails, [{ kind: 'time_corrected', model: null, deterministic: '16:30' }]);
+    });
+
+    it('is not overruled when AM or PM was only a guess', async () => {
+      stub.enqueue(tool({ reply: 'Which day?', intent: 'collecting', serviceName: 'Routine Checkup', time: '20:00' }));
+      const t = await turn('routine checkup around 8');
+      assert.equal(t.bookingDraft.time, '20:00');
+      const [row] = await logsFor(t.sessionId, 1);
+      assert.equal(row.guardrails, null);
+    });
+  });
+
+  describe('a model that invents a service', () => {
+    it('cannot choose a service the user never named: the draft keeps none and the reply asks', async () => {
+      // The live failure: answering "whenever" with serviceName "Routine Checkup".
+      stub.enqueue(tool({ reply: 'What would you like to book, and when?', intent: 'collecting' }));
+      const t1 = await turn('hi, can I book an appointment');
+      stub.enqueue(
+        tool({ reply: 'Great, a Routine Checkup — which day?', intent: 'collecting', serviceName: 'Routine Checkup' }),
+      );
+      const t2 = await turn('whenever', t1.sessionId);
+
+      assert.equal(t2.bookingDraft.serviceName, null);
+      assert.equal(t2.action, 'collect_info');
+      assert.deepEqual(t2.missing, ['serviceName', 'date', 'time']);
+      assert.match(t2.message.content, /^Which service would you like\? We offer: /);
+      assert.ok(!t2.message.content.includes('Great, a Routine Checkup'));
+      const rows = await logsFor(t1.sessionId, 2);
+      assert.deepEqual(rows[1].guardrails, [{ kind: 'service_ungrounded', model: 'Routine Checkup', kept: null }]);
+      assert.equal(rows[1].extracted_slots.serviceName, undefined);
+    });
+
+    it('keeps the service the user chose when the model swaps in another', async () => {
+      stub.enqueue(tool({ reply: 'Which day?', intent: 'collecting', serviceName: 'Teeth Whitening' }));
+      const t1 = await turn('whitening please');
+      stub.enqueue(tool({ reply: 'Routine Checkup, then — what time?', intent: 'collecting', serviceName: 'Routine Checkup' }));
+      const t2 = await turn('any day is fine', t1.sessionId);
+
+      assert.equal(t2.bookingDraft.serviceName, 'Teeth Whitening');
+      assert.ok(!t2.message.content.includes('Routine Checkup'), t2.message.content);
+    });
+
+    it('accepts a service the user named in an earlier message', async () => {
+      stub.enqueue(tool({ reply: 'Which day?', intent: 'collecting' }));
+      const t1 = await turn('I need a check up');
+      stub.enqueue(tool({ reply: 'And what time?', intent: 'collecting', serviceName: 'Routine Checkup', date: freshDate() }));
+      const t2 = await turn('the 14th', t1.sessionId);
+
+      assert.equal(t2.bookingDraft.serviceName, 'Routine Checkup');
+      assert.equal(t2.message.content, 'And what time?');
     });
   });
 

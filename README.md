@@ -121,7 +121,7 @@ sequenceDiagram
   A->>M: one forced tool call (schema from @appt/shared)
   alt usable answer
     M-->>A: tool arguments
-    A->>A: zod parse · date cross-check · reply guardrail
+    A->>A: zod parse · date/time cross-check · service grounding · reply guardrail
   else timeout / 429 / 5xx / 401 / invalid output
     A->>A: deterministic engine reads the same message
   end
@@ -132,7 +132,7 @@ sequenceDiagram
   K->>D: checkSlot, then INSERT (EXCLUDE constraint decides races)
   K-->>C: booked, or refusal + nearby free times
   C->>C: choose action: collect_info | confirm | booked | needs_form
-  C->>D: assistant message + meta {action, suggestions, missing}, new draft
+  C->>D: assistant message + meta {action, suggestions, missing, draft, appointmentId}, new draft
   R->>S: assistant:typing false · assistant:turn · appointment:created
   R-->>B: 201 AssistantTurnDto
 ```
@@ -225,8 +225,8 @@ Web (`apps/web`, read by Next.js **at build time**):
 
 | Suite | Command | Count (latest local run) | Needs |
 |---|---|---|---|
-| API unit + integration | `npm test -w @appt/api` | **559 tests**, 22 files, all passing (~28 s) | Postgres on :5433 (creates throwaway `appt_test*` databases) |
-| Web unit/component | `npm test -w @appt/web` | **425 tests**, 39 files, all passing (~7 s) | nothing |
+| API unit + integration | `npm test -w @appt/api` | **589 tests**, 22 files, all passing (~28 s) | Postgres on :5433 (creates throwaway `appt_test*` databases) |
+| Web unit/component | `npm test -w @appt/web` | **439 tests**, 39 files, all passing (~7 s) | nothing |
 | End-to-end (Playwright) | `npm run e2e` | **50 tests**: 25 scenarios × desktop and mobile Chrome, 6 spec files | a running stack (below) |
 | Types + lint | `npm run typecheck && npm run lint` | clean | — |
 

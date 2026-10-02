@@ -1,8 +1,8 @@
 import type { z } from 'zod';
 import type {
   AssistantTurnDto,
-  ChatMessageDto,
   ChatSessionDto,
+  ChatTranscriptDto,
   SendMessageInput,
   submitDraftSchema,
 } from '@appt/shared';
@@ -10,10 +10,8 @@ import { apiRequest } from './client';
 
 export type SubmitDraftRequest = z.input<typeof submitDraftSchema>;
 
-export interface ChatTranscript {
-  session: ChatSessionDto;
-  messages: ChatMessageDto[];
-}
+/** A conversation, its messages, and the bookings it made that are still going ahead. */
+export type ChatTranscript = ChatTranscriptDto;
 
 export const chatApi = {
   /** The conversation sidebar, most recently active first. */

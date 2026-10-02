@@ -1,8 +1,8 @@
 import { EMPTY_SLOTS } from '@appt/shared';
 import { describe, expect, it } from 'vitest';
-import { COMPLETE_DRAFT, SESSION_ID, appointment } from '../test/factories';
+import { COMPLETE_DRAFT, appointment } from '../test/factories';
 import type { ChatItem } from './reducer';
-import { findBookedAppointment, liveItemKey, restoreTurnMeta } from './turn-meta';
+import { liveItemKey, turnMetaFor, type TurnContext } from './turn-meta';
 
 const item = (key: string, role: ChatItem['role']): ChatItem => ({
   key,
@@ -29,58 +29,92 @@ describe('liveItemKey', () => {
   });
 });
 
-describe('restoreTurnMeta', () => {
-  const collecting = { draft: { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' }, status: 'active' as const };
+describe('turnMetaFor', () => {
+  const collectingDraft = { ...EMPTY_SLOTS, serviceName: 'Routine Checkup' };
+  const context = (overrides: Partial<TurnContext> = {}): TurnContext => ({
+    turns: {},
+    draft: collectingDraft,
+    status: 'active',
+    appointments: [],
+    ...overrides,
+  });
+  const reply = (overrides: Partial<ChatItem> = {}): ChatItem => ({ ...item('a', 'assistant'), ...overrides });
 
-  it('restores the action the server recorded, including an offer of the form', () => {
-    expect(restoreTurnMeta({ action: 'needs_form' }, collecting)).toMatchObject({
+  it('prefers the turn this tab received', () => {
+    const received = { action: 'confirm' as const, missing: [], bookingDraft: COMPLETE_DRAFT };
+    expect(turnMetaFor(reply({ action: 'collect_info' }), false, context({ turns: { a: received } }))).toBe(received);
+  });
+
+  it('rebuilds an earlier reply from the draft stored with it, not the session’s current one', () => {
+    const shown = { ...COMPLETE_DRAFT, time: '10:00' };
+    const meta = turnMetaFor(reply({ action: 'confirm', draft: shown }), false, context({ draft: COMPLETE_DRAFT }));
+    expect(meta).toMatchObject({ action: 'confirm', bookingDraft: shown, missing: [] });
+  });
+
+  it('gives an earlier reply stored without a draft no card, rather than one built from today’s draft', () => {
+    expect(turnMetaFor(reply({ action: 'confirm' }), false, context({ draft: COMPLETE_DRAFT }))).toBeNull();
+  });
+
+  it('uses the session’s draft for the latest reply stored without one', () => {
+    expect(turnMetaFor(reply({ action: 'needs_form' }), true, context())).toMatchObject({
       action: 'needs_form',
       missing: ['date', 'time'],
-      bookingDraft: collecting.draft,
+      bookingDraft: collectingDraft,
     });
   });
 
   it('restores the suggested times recorded with the reply', () => {
     const suggestions = [{ date: '2026-10-05', time: '15:00', label: '3:00 PM' }];
-    expect(restoreTurnMeta({ action: 'collect_info', suggestions }, collecting).suggestions).toEqual(suggestions);
+    expect(turnMetaFor(reply({ action: 'collect_info', suggestions }), true, context())?.suggestions).toEqual(suggestions);
   });
 
   it('trusts the recorded action over what the draft would suggest', () => {
-    expect(restoreTurnMeta({ action: 'collect_info' }, { draft: COMPLETE_DRAFT, status: 'active' }).action).toBe('collect_info');
+    expect(turnMetaFor(reply({ action: 'collect_info' }), true, context({ draft: COMPLETE_DRAFT }))?.action).toBe('collect_info');
   });
 
-  it('attaches the appointment to a recorded booking when it is known', () => {
+  it('is nothing for a user message', () => {
+    expect(turnMetaFor(item('u', 'user'), false, context())).toBeNull();
+  });
+
+  describe('a booked reply', () => {
     const booked = appointment();
-    expect(restoreTurnMeta({ action: 'booked' }, { draft: COMPLETE_DRAFT, status: 'completed' }, booked)).toMatchObject({
-      action: 'booked',
-      appointment: booked,
+
+    it('shows the appointment it names, from the transcript’s bookings', () => {
+      const other = appointment({ id: 'other' });
+      const meta = turnMetaFor(
+        reply({ action: 'booked', draft: COMPLETE_DRAFT, appointmentId: booked.id }),
+        true,
+        context({ status: 'completed', appointments: [other, booked] }),
+      );
+      expect(meta).toMatchObject({ action: 'booked', appointment: booked, bookingDraft: COMPLETE_DRAFT });
+    });
+
+    it('has no appointment once it is cancelled (gone from the transcript), keeping its draft', () => {
+      const meta = turnMetaFor(reply({ action: 'booked', draft: COMPLETE_DRAFT, appointmentId: booked.id }), true, context());
+      expect(meta).toMatchObject({ action: 'booked', appointment: undefined, bookingDraft: COMPLETE_DRAFT });
+    });
+
+    it('stored before it named its appointment, takes the conversation’s one booking', () => {
+      const meta = turnMetaFor(reply({ action: 'booked' }), true, context({ draft: COMPLETE_DRAFT, status: 'completed', appointments: [booked] }));
+      expect(meta?.appointment).toBe(booked);
     });
   });
 
-  describe('for a message stored before actions were recorded', () => {
+  describe('for the latest message stored before actions were recorded', () => {
     it('infers a confirmation from a complete draft', () => {
-      expect(restoreTurnMeta({ action: null }, { draft: COMPLETE_DRAFT, status: 'active' }).action).toBe('confirm');
+      expect(turnMetaFor(reply(), true, context({ draft: COMPLETE_DRAFT }))?.action).toBe('confirm');
     });
 
     it('infers collecting from an incomplete draft', () => {
-      expect(restoreTurnMeta({ action: null }, collecting).action).toBe('collect_info');
+      expect(turnMetaFor(reply(), true, context())?.action).toBe('collect_info');
     });
 
     it('infers a booking from a completed session', () => {
-      expect(restoreTurnMeta({ action: null }, { draft: COMPLETE_DRAFT, status: 'completed' }).action).toBe('booked');
+      expect(turnMetaFor(reply(), true, context({ draft: COMPLETE_DRAFT, status: 'completed' }))?.action).toBe('booked');
     });
-  });
-});
 
-describe('findBookedAppointment', () => {
-  it('finds the live appointment that points back at the session', () => {
-    const mine = appointment();
-    const other = appointment({ id: 'other', chatSessionId: 'another-session' });
-    expect(findBookedAppointment(SESSION_ID, [other, mine])).toBe(mine);
-  });
-
-  it('ignores a cancelled one, and a missing session', () => {
-    expect(findBookedAppointment(SESSION_ID, [appointment({ status: 'cancelled' })])).toBeUndefined();
-    expect(findBookedAppointment(null, [appointment()])).toBeUndefined();
+    it('infers nothing for an older one', () => {
+      expect(turnMetaFor(reply(), false, context({ draft: COMPLETE_DRAFT }))).toBeNull();
+    });
   });
 });

@@ -102,7 +102,7 @@ type ExtractionContext = Pick<ProviderInput, 'timezone' | 'opensAt' | 'closesAt'
  * Read the booking slots one message states, by code alone.
  *
  * The fallback's whole understanding of a message. Its calendar half,
- * readCalendar, doubles as the cross-check on the model (see guardrails.ts).
+ * readDate and readTime, doubles as the cross-check on the model (see guardrails.ts).
  */
 export function extractSlots(text: string, ctx: ExtractionContext): Partial<BookingSlots> {
   const slots: Partial<BookingSlots> = {};
@@ -112,9 +112,8 @@ export function extractSlots(text: string, ctx: ExtractionContext): Partial<Book
   if (service) slots.serviceName = service;
 
   // ---- date and time -------------------------------------------------
-  const stated = readCalendar(text, ctx);
-  if (stated.date) slots.date = stated.date;
-  if (stated.time) slots.time = stated.time;
+  const date = readDate(text, ctx);
+  if (date) slots.date = date;
 
   // chrono resolves "October 12th" but not a bare "the 12th", which is how
   // people most often propose a date in conversation.
@@ -123,13 +122,8 @@ export function extractSlots(text: string, ctx: ExtractionContext): Partial<Book
     if (ordinal) slots.date = ordinal;
   }
 
-  // chrono does not read a clock hour without "at" or am/pm ("around 3",
-  // "4ish"), and a part of the day ahead of it ("afternoon around 3") would
-  // otherwise win below and turn 3 o'clock into the 14:00 default.
-  if (!slots.time) {
-    const bare = matchBareHour(text);
-    if (bare) slots.time = `${pad(resolveMeridiem(bare.hour, bare.minute, text, ctx))}:${pad(bare.minute)}`;
-  }
+  const time = readTime(text, ctx);
+  if (time) slots.time = time.time;
 
   // "morning"/"afternoon"/"evening" with no clock time: offer a sensible
   // default inside opening hours rather than discarding the preference.
@@ -207,39 +201,56 @@ export function matchOrdinalDay(text: string, today: string): string | null {
 }
 
 /**
- * The date and time chrono can read from a message with certainty.
+ * The date chrono can read from a message with certainty.
  *
  * This is the calendar arithmetic ("next Wednesday" from today's date in the
  * business's zone) — the part the model cross-check trusts over the model.
  */
-export function readCalendar(text: string, ctx: ExtractionContext): { date?: string; time?: string } {
-  const found: { date?: string; time?: string } = {};
-
+export function readDate(text: string, ctx: Pick<ExtractionContext, 'timezone'>): string | null {
   // chrono resolves relative expressions against a reference instant. That
   // reference must be the business's wall clock, not the server's, or
   // "tomorrow" shifts by a day for a server in a different timezone.
-  const reference = zonedNow(ctx.timezone);
-  for (const { text: matched, start } of chrono.parse(text, reference, { forwardDate: true })) {
+  for (const { text: matched, start } of chrono.parse(text, zonedNow(ctx.timezone), { forwardDate: true })) {
     // Skip ranges too vague to pin to a day (see VAGUE_RANGE).
     if (VAGUE_RANGE.test(matched.trim())) continue;
     // A date is only taken when chrono is actually confident about it.
     // Implied values are chrono filling in today's date to complete a
     // bare time like "2pm" — treating that as a stated date would book
     // people for today whenever they mentioned a time.
-    const hasExplicitDate = start.isCertain('day') || start.isCertain('weekday') || start.isCertain('month');
-
-    if (hasExplicitDate && !found.date) {
-      found.date = `${start.get('year')}-${pad(start.get('month'))}-${pad(start.get('day'))}`;
-    }
-    if (start.isCertain('hour') && !found.time) {
-      const hour = start.get('hour') ?? 0;
-      const minute = start.get('minute') ?? 0;
-      // chrono reads a bare "at 3" as 3 AM. Only an explicit am/pm settles it.
-      const resolved = start.isCertain('meridiem') ? hour : resolveMeridiem(hour, minute, text, ctx);
-      found.time = `${pad(resolved)}:${pad(minute)}`;
+    if (start.isCertain('day') || start.isCertain('weekday') || start.isCertain('month')) {
+      return `${start.get('year')}-${pad(start.get('month'))}-${pad(start.get('day'))}`;
     }
   }
-  return found;
+  return null;
+}
+
+/**
+ * A clock time the message states, as HH:MM. `settled` is true when the text
+ * itself fixes AM or PM — "3pm", "15:30", "noon", "afternoon around 3" — and
+ * false when the hour had to be placed by opening hours ("at 10"), a guess the
+ * model, which has the whole conversation, may make better. Only a settled
+ * time overrules the model (see guardrails.ts).
+ */
+export interface StatedTime {
+  time: string;
+  settled: boolean;
+}
+
+export function readTime(text: string, ctx: Pick<ExtractionContext, 'timezone' | 'opensAt' | 'closesAt'>): StatedTime | null {
+  const clock = (hour: number, minute: number, meridiemStated: boolean): StatedTime => ({
+    // chrono reads a bare "at 3" as 3 AM. Only an explicit am/pm settles it.
+    time: `${pad(meridiemStated ? hour : resolveMeridiem(hour, minute, text, ctx))}:${pad(minute)}`,
+    settled: meridiemStated || hour === 0 || hour >= 12 || statedPartOfDay(text) !== null,
+  });
+
+  for (const { start } of chrono.parse(text, zonedNow(ctx.timezone), { forwardDate: true })) {
+    if (start.isCertain('hour')) return clock(start.get('hour') ?? 0, start.get('minute') ?? 0, start.isCertain('meridiem'));
+  }
+  // chrono does not read a clock hour without "at" or am/pm ("around 3",
+  // "4ish"), and a part of the day ahead of it ("afternoon around 3") would
+  // otherwise win in extractSlots and turn 3 o'clock into the 14:00 default.
+  const bare = matchBareHour(text);
+  return bare ? clock(bare.hour, bare.minute, false) : null;
 }
 
 const toMinutes = (time: string): number => {
@@ -278,9 +289,8 @@ export function resolveMeridiem(
   hours: Pick<ProviderInput, 'opensAt' | 'closesAt'>,
 ): number {
   if (hour === 0 || hour >= 12) return hour;
-  const lower = text.toLowerCase();
-  if (/\bmorning\b/.test(lower)) return hour;
-  if (/\b(afternoon|evening|tonight|after lunch|after work)\b/.test(lower)) return hour + 12;
+  const part = statedPartOfDay(text);
+  if (part) return part === 'am' ? hour : hour + 12;
 
   const open = toMinutes(hours.opensAt);
   const close = toMinutes(hours.closesAt);
@@ -289,6 +299,14 @@ export function resolveMeridiem(
   const pm = isOpen(hour + 12);
   if (am !== pm) return am ? hour : hour + 12;
   return hour <= 7 ? hour + 12 : hour;
+}
+
+/** "morning" keeps an hour in the AM; "afternoon", "evening" and the like move it to the PM. */
+function statedPartOfDay(text: string): 'am' | 'pm' | null {
+  const lower = text.toLowerCase();
+  if (/\bmorning\b/.test(lower)) return 'am';
+  if (/\b(afternoon|evening|tonight|after lunch|after work)\b/.test(lower)) return 'pm';
+  return null;
 }
 
 /** "morning" -> opening time, "afternoon" -> 14:00, "evening" -> late but inside hours. */

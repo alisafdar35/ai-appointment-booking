@@ -16,8 +16,8 @@ import {
  * The query cache owns what the server has told us (sessions, transcripts);
  * this reducer owns what the server has NOT yet confirmed: a message that is
  * still in flight, one that failed and can be retried, and the full payload of
- * each assistant turn this tab received (the transcript records a reply's
- * action and suggestions, but not the draft or appointment that went with it).
+ * each assistant turn this tab received (the appointment row arrives with the
+ * turn; after a reload it comes from the transcript instead).
  * Keeping it pure — no clocks, no ids, no network — is what makes the awkward
  * parts testable: optimistic writes, reconciling with the server's version of
  * the same message, and the socket echoing our own turn back to us.
@@ -56,6 +56,10 @@ export interface ChatItem {
   /** What the server decided the UI should offer with this reply. Null for user messages and legacy rows. */
   action: AssistantAction | null;
   suggestions?: BookingSuggestion[];
+  /** The draft after this reply, as recorded with it. Absent for user messages and older rows. */
+  draft?: BookingSlots;
+  /** For a 'booked' reply: the appointment it created. */
+  appointmentId?: string;
   createdAt: string;
   status: ItemStatus;
   failure?: SendFailure;
@@ -123,6 +127,8 @@ const serverItem = (message: ChatMessageDto, role: Speaker): ChatItem => ({
   engine: message.engine,
   action: message.action,
   suggestions: message.suggestions,
+  draft: message.draft,
+  appointmentId: message.appointmentId,
   createdAt: message.createdAt,
   status: 'sent',
 });
@@ -135,6 +141,8 @@ const confirmedBy = (item: ChatItem, message: ChatMessageDto): ChatItem => ({
   engine: message.engine,
   action: message.action,
   suggestions: message.suggestions,
+  draft: message.draft,
+  appointmentId: message.appointmentId,
   createdAt: message.createdAt,
 });
 

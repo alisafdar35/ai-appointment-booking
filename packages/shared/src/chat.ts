@@ -51,6 +51,15 @@ export interface ChatMessageDto {
    */
   action: AssistantAction | null;
   suggestions?: BookingSuggestion[];
+  /**
+   * The booking draft as it stood after this turn, so an older confirmation or
+   * receipt is rebuilt from its own details rather than from the session's
+   * latest draft. Absent for user messages and messages stored before it was
+   * recorded.
+   */
+  draft?: BookingSlots;
+  /** The appointment a 'booked' turn created; its row is in the transcript's `appointments`. */
+  appointmentId?: string;
   createdAt: string;
 }
 
@@ -62,6 +71,17 @@ export interface ChatSessionDto {
   messageCount: number;
   lastMessageAt: string | null;
   createdAt: string;
+}
+
+/** GET /api/chat/sessions/:id. */
+export interface ChatTranscriptDto {
+  session: ChatSessionDto;
+  messages: ChatMessageDto[];
+  /**
+   * The session's bookings that are still going ahead (not cancelled), so a
+   * booked card shows the row as it is now — past, staff-made or far ahead alike.
+   */
+  appointments: AppointmentDto[];
 }
 
 /**

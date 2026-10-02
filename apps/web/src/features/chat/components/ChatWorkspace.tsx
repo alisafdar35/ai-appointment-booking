@@ -8,16 +8,14 @@ import { useCurrentUser } from '@/providers/AuthProvider';
 import { useChat } from '../hooks/useChat';
 import { useMediaQuery } from '../hooks/useMediaQuery';
 import { NEW_SESSION_KEY, type SessionKey } from '../lib/reducer';
-import { findBookedAppointment } from '../lib/turn-meta';
 import { ConversationPanel } from './ConversationPanel';
 import { SessionList } from './SessionList';
 import { SideRail } from './SideRail';
 
 /**
- * Bookings still going ahead, soonest first. Cancelled ones are excluded by the
- * query, so the rail is never short. A conversation's booked card uses the row
- * from here when it is in this window, and falls back to the session's booked
- * draft when it is not.
+ * Bookings still going ahead, soonest first, for the rail. Cancelled ones are
+ * excluded by the query, so the rail is never short. A conversation's booked
+ * card does not depend on this window: its row comes with the transcript.
  */
 const UPCOMING_FILTERS = { window: 'upcoming', status: statusFilter(['pending', 'confirmed']), limit: 20 } as const;
 const EMPTY_SERVICES: never[] = [];
@@ -107,7 +105,6 @@ export function ChatWorkspace() {
             timeZone={timeZone}
             businessName={businessName}
             services={services.data ?? EMPTY_SERVICES}
-            bookedAppointment={findBookedAppointment(chat.sessionId, appointments.data)}
             onOpenSessions={showSessionList ? undefined : () => setSessionsOpen(true)}
             onOpenSummary={showRail ? undefined : () => setSummaryOpen(true)}
             composerFocusRequest={composerFocusRequest}

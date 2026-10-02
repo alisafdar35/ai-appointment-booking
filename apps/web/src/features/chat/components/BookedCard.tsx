@@ -9,11 +9,11 @@ import { formatPrice } from '@/lib/utils';
 
 interface BookedCardProps {
   /**
-   * The booked row, when the client has it: always right after booking, and
-   * after a reload while it is among the upcoming appointments already loaded.
+   * The booked row, when the client has it: right after booking, and after a
+   * reload from the transcript's bookings unless it has since been cancelled.
    */
   appointment: AppointmentDto | undefined;
-  /** What the conversation booked. The session keeps it, so the receipt survives a reload without the row. */
+  /** What the conversation booked, as stored with the message, so the receipt survives without the row. */
   draft: BookingSlots;
   /** The catalogue entry for the draft's service, for the price when only the draft is known. */
   service: ServiceDto | undefined;

@@ -83,7 +83,7 @@ erDiagram
     text content
     jsonb tool_calls "raw extraction"
     text engine "mistral|fallback|system"
-    jsonb meta "{action, suggestions, missing}"
+    jsonb meta "{action, suggestions, missing, draft, appointmentId}"
   }
   ai_interaction_logs {
     bigserial id PK

@@ -1,6 +1,7 @@
 import { QueryClient } from '@tanstack/react-query';
 import { describe, expect, it } from 'vitest';
 import type { AppointmentDto } from '@appt/shared';
+import type { ChatTranscript } from '@/lib/api';
 import { appointmentMatchesFilters, upsertAppointmentInCaches, upsertIntoList } from './appointment-cache';
 import { queryKeys } from './keys';
 
@@ -100,5 +101,38 @@ describe('upsertAppointmentInCaches', () => {
     ).toEqual(['b', 'a']);
     expect(queryClient.getQueryData<AppointmentDto[]>(queryKeys.appointments.list({ status: 'cancelled' }))).toEqual([]);
     expect(queryClient.getQueryState(queryKeys.availability.forDate('svc-1', '2026-10-06'))?.isInvalidated).toBe(true);
+  });
+});
+
+describe('upsertAppointmentInCaches and the transcript of the conversation that booked it', () => {
+  const sessionId = 'session-1';
+  const fromChat = { ...soon, chatSessionId: sessionId };
+  const transcriptKey = queryKeys.chat.transcript(sessionId);
+  const seeded = (appointments: AppointmentDto[]) => {
+    const client = new QueryClient();
+    const transcript = { session: { id: sessionId }, messages: [], appointments } as unknown as ChatTranscript;
+    client.setQueryData(transcriptKey, transcript);
+    return client;
+  };
+  const booked = (client: QueryClient) => client.getQueryData<ChatTranscript>(transcriptKey)!.appointments;
+
+  it('replaces the row, so a receipt shows its status as it is now', () => {
+    const client = seeded([fromChat]);
+    const moved = { ...fromChat, status: 'pending' as const };
+    upsertAppointmentInCaches(client, moved);
+    expect(booked(client)).toEqual([moved]);
+  });
+
+  it('drops it once cancelled, as the server would', () => {
+    const client = seeded([fromChat]);
+    upsertAppointmentInCaches(client, { ...fromChat, status: 'cancelled' });
+    expect(booked(client)).toEqual([]);
+  });
+
+  it('leaves alone a transcript that was never loaded, and bookings from no conversation', () => {
+    const client = new QueryClient();
+    upsertAppointmentInCaches(client, fromChat);
+    upsertAppointmentInCaches(client, soon);
+    expect(client.getQueryData(transcriptKey)).toBeUndefined();
   });
 });

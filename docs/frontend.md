@@ -46,7 +46,8 @@ apps/web/src
 **Chat reconciliation details** ([`useChat.ts`](../apps/web/src/features/chat/hooks/useChat.ts)):
 - A sent message appears immediately with a local key. The server returns `userMessage.id`, and the bubble is matched **by id**, keeping its React key, so two identical "yes" messages never cross-match.
 - The reducer is keyed by session, so a reply arriving after you switch conversations lands in the right one.
-- On reload, each assistant message's stored `action`/`suggestions` restore the confirmation card, suggestion chips and form offer (`turn-meta.ts`). Older rows without `action` fall back to inference from the draft.
+- On reload, every assistant message is rebuilt from what was stored with it (`turnMetaFor` in `turn-meta.ts`): its `action`, `suggestions` and `draft` snapshot restore each confirmation card (earlier ones disabled, only the latest live), the suggestion chips and the form offer; a `booked` message's `appointmentId` picks its row from the transcript's `appointments`, so the receipt does not depend on the rail's capped upcoming list. Without the row (cancelled since) the receipt falls back to the message's draft and claims no status. Older rows without a `draft` get a card only when they are the latest message (from the session's draft); rows without an `action` fall back to inference from the draft.
+- A server-confirmed appointment update (cancellation from the dashboard, a socket event) is folded into the cached transcript of the conversation that booked it, so its receipt follows.
 - `assistant:turn` from another tab is merged into the transcript cache. `assistant:typing` shows dots in the open conversation, with a 15 s timeout if the turn never arrives.
 - On first load the latest *unfinished* conversation is resumed; otherwise a new one starts. This decision is made once, so a refetch never moves the user.
 
@@ -111,5 +112,5 @@ Set in [`next.config.mjs`](../apps/web/next.config.mjs): `X-Frame-Options: DENY`
 
 ## Tests
 
-- **Vitest + Testing Library** (425 tests): reducer, turn-meta restore, cache upserts, failure mapping, ICS generation, retry policy, API client refresh and superseded handling, `useChat` (optimistic flow, socket echo, typing, `SESSION_CLOSED`), ConversationPanel, dialogs, forms and tabs.
+- **Vitest + Testing Library** (439 tests): reducer, turn-meta rebuild, cache upserts, failure mapping, ICS generation, retry policy, API client refresh and superseded handling, `useChat` (optimistic flow, socket echo, typing, `SESSION_CLOSED`), ConversationPanel, dialogs, forms and tabs.
 - **Playwright** ([`e2e/`](../apps/web/e2e)): conversational booking with a mid-flow correction, taken slot leading to a suggestion and a booking, form fallback, appointments dialog and cancel, realtime across two tabs, resilience (injected 500, network failure, 429 with Retry-After), signup create/join, and route guard redirect. Each runs on desktop and Pixel 7 projects.

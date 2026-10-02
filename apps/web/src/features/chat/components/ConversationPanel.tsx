@@ -16,7 +16,7 @@ import { downloadTextFile } from '../lib/download';
 import type { FormReason } from '../lib/fallback-form';
 import { buildIcs, icsFileName } from '../lib/ics';
 import { NEW_SESSION_KEY } from '../lib/reducer';
-import { liveItemKey, restoreTurnMeta } from '../lib/turn-meta';
+import { liveItemKey, turnMetaFor, type TurnContext } from '../lib/turn-meta';
 import { Composer, type ComposerHandle } from './Composer';
 import { DraftSummaryBar } from './DraftSummaryBar';
 import { EngineNotice } from './EngineNotice';
@@ -35,8 +35,6 @@ interface ConversationPanelProps {
   timeZone: string;
   businessName: string;
   services: readonly ServiceDto[];
-  /** The appointment a completed conversation produced, when it is known to the appointments cache. */
-  bookedAppointment: AppointmentDto | undefined;
   /** Below the xl breakpoint the conversation list lives behind a button. */
   onOpenSessions?: () => void;
   /** Below the lg breakpoint the right rail collapses into a bar above the composer. */
@@ -53,7 +51,6 @@ export function ConversationPanel({
   timeZone,
   businessName,
   services,
-  bookedAppointment,
   onOpenSessions,
   onOpenSummary,
   composerFocusRequest = 0,
@@ -64,12 +61,10 @@ export function ConversationPanel({
   const formRef = useRef<HTMLDivElement>(null);
 
   // ---- what is live: only the newest assistant message can be acted on -----
+  const turnContext: TurnContext = { turns: chat.turns, draft, status: sessionStatus, appointments: chat.appointments };
   const liveKey = liveItemKey(items);
   const liveItem = liveKey ? items[items.length - 1] : undefined;
-  const recorded = liveItem?.id ? chat.turns[liveItem.id] : undefined;
-  const liveMeta = liveItem
-    ? (recorded ?? restoreTurnMeta(liveItem, { draft, status: sessionStatus }, bookedAppointment))
-    : null;
+  const liveMeta = liveItem ? turnMetaFor(liveItem, true, turnContext) : null;
   const completed = sessionStatus === 'completed';
 
   // ---- the structured form: opened by the user, or offered by a needs_form turn
@@ -203,8 +198,7 @@ export function ConversationPanel({
             ) : items.length > 0 ? (
               <MessageList
                 items={items}
-                turns={chat.turns}
-                restoredMeta={liveMeta}
+                context={turnContext}
                 services={services}
                 timeZone={timeZone}
                 actions={{

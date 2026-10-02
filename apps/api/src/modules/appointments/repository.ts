@@ -177,6 +177,24 @@ export async function create(
   return rows[0]?.id ?? null;
 }
 
+/**
+ * The bookings a conversation made that are still going ahead, oldest first.
+ * Scoped to the tenant and to the conversation's own user, like the transcript
+ * it is served with.
+ */
+export async function listForChatSession(
+  ctx: { businessId: string; userId: string },
+  sessionId: string,
+): Promise<AppointmentDto[]> {
+  const { rows } = await pool.query<AppointmentRow>(
+    `${APPOINTMENT_SELECT}
+     WHERE a.business_id = $1 AND a.user_id = $2 AND a.chat_session_id = $3 AND a.status <> 'cancelled'
+     ORDER BY a.created_at`,
+    [ctx.businessId, ctx.userId, sessionId],
+  );
+  return rows.map(toDto);
+}
+
 /** Is this conversation the caller's own, in their tenant? */
 export async function ownsChatSession(
   ctx: { businessId: string; userId: string },

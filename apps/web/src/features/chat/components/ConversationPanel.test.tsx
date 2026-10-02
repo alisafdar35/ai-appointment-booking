@@ -52,6 +52,7 @@ function controller(overrides: Partial<ChatController> = {}): ChatController {
     sessionId: 'session-1',
     items: [],
     turns: {},
+    appointments: [],
     draft: EMPTY_SLOTS,
     sessionStatus: 'active',
     isSending: false,
@@ -79,7 +80,6 @@ function renderPanel(chat: ChatController, extra: { draft?: BookingSlots } = {})
         timeZone="America/New_York"
         businessName="Bluewave Dental"
         services={[CHECKUP, WHITENING]}
-        bookedAppointment={undefined}
       />,
     ),
   );
@@ -150,6 +150,37 @@ describe('only the latest actionable card is interactive', () => {
       }),
     );
     expect(screen.getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+  });
+
+  it('rebuilds every earlier summary from its own message after a reload, with only the latest live', () => {
+    const earlierDraft = { ...COMPLETE_DRAFT, time: '10:00' };
+    renderPanel(
+      controller({
+        items: [
+          item('1', 'user'),
+          item('2', 'assistant', { action: 'confirm', draft: earlierDraft }),
+          item('3', 'user'),
+          item('4', 'assistant', { action: 'confirm', draft: COMPLETE_DRAFT }),
+        ],
+        draft: COMPLETE_DRAFT,
+      }),
+    );
+
+    const [earlier, latest] = screen.getAllByRole('region', { name: 'Booking summary' });
+    expect(within(earlier!).getByText('10:00 AM EDT')).toBeInTheDocument();
+    expect(within(earlier!).getByRole('button', { name: 'Confirm booking' })).toBeDisabled();
+    expect(within(latest!).getByText('2:00 PM EDT')).toBeInTheDocument();
+    expect(within(latest!).getByRole('button', { name: 'Confirm booking' })).toBeEnabled();
+  });
+
+  it('shows no card for an earlier summary stored before drafts were recorded', () => {
+    renderPanel(
+      controller({
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'confirm' }), item('3', 'user'), item('4', 'assistant', { action: 'collect_info' })],
+        draft: COMPLETE_DRAFT,
+      }),
+    );
+    expect(screen.queryByRole('region', { name: 'Booking summary' })).not.toBeInTheDocument();
   });
 
   it('restores the live summary after a reload from the action recorded on the message', () => {
@@ -226,6 +257,37 @@ describe('booked turn', () => {
     expect(content).toContain('BEGIN:VCALENDAR');
     expect(content).toContain('DTSTART:20261005T180000Z');
     expect(mime).toBe('text/calendar;charset=utf-8');
+  });
+
+  it('after a reload, shows the booking from the transcript, however far off or long past it is', async () => {
+    const booked = appointment({ id: 'far-off', startsAt: '2027-06-01T14:00:00.000Z', endsAt: '2027-06-01T14:30:00.000Z' });
+    renderPanel(
+      controller({
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'booked', draft: COMPLETE_DRAFT, appointmentId: 'far-off' })],
+        appointments: [booked],
+        draft: COMPLETE_DRAFT,
+        sessionStatus: 'completed',
+      }),
+    );
+
+    const card = screen.getByRole('region', { name: 'Booked appointment' });
+    expect(within(card).getByText('Confirmed')).toBeInTheDocument();
+    expect(within(card).getByText('Tuesday, June 1, 2027')).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: 'Add to calendar' }));
+    expect(vi.mocked(downloadTextFile)).toHaveBeenCalledOnce();
+  });
+
+  it('after a reload, without the appointment (cancelled since), still shows what was booked from the message’s draft', () => {
+    renderPanel(
+      controller({
+        items: [item('1', 'user'), item('2', 'assistant', { action: 'booked', draft: COMPLETE_DRAFT, appointmentId: 'gone' })],
+        draft: EMPTY_SLOTS,
+        sessionStatus: 'completed',
+      }),
+    );
+    const card = screen.getByRole('region', { name: 'Booked appointment' });
+    expect(within(card).getByText('Booked in this conversation')).toBeInTheDocument();
+    expect(within(card).getByText('2:00 PM EDT')).toBeInTheDocument();
   });
 
   it('after a reload, without the appointment loaded, still shows what was booked from the session draft', () => {
@@ -462,8 +524,7 @@ describe('composer focus', () => {
           timeZone="America/New_York"
           businessName="Bluewave Dental"
           services={[CHECKUP, WHITENING]}
-          bookedAppointment={undefined}
-          composerFocusRequest={request}
+            composerFocusRequest={request}
         />
       </QueryClientProvider>
     );
@@ -489,7 +550,6 @@ describe('the form in a brand-new conversation (real controller)', () => {
         timeZone="America/New_York"
         businessName="Bluewave Dental"
         services={[CHECKUP, WHITENING]}
-        bookedAppointment={undefined}
       />
     );
   }
@@ -498,7 +558,7 @@ describe('the form in a brand-new conversation (real controller)', () => {
     vi.useFakeTimers({ toFake: ['Date'], now: new Date('2026-10-02T14:00:00.000Z') });
     vi.spyOn(chatApi, 'listSessions').mockResolvedValue([]);
     vi.spyOn(chatApi, 'createSession').mockResolvedValue(session({ id: 'fresh', messageCount: 0 }));
-    vi.spyOn(chatApi, 'getTranscript').mockResolvedValue({ session: session({ id: 'fresh', messageCount: 0 }), messages: [] });
+    vi.spyOn(chatApi, 'getTranscript').mockResolvedValue({ session: session({ id: 'fresh', messageCount: 0 }), messages: [], appointments: [] });
     vi.spyOn(servicesApi, 'availability').mockResolvedValue({
       date: '2026-10-05',
       serviceId: CHECKUP.id,

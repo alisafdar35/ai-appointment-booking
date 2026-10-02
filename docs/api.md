@@ -248,8 +248,9 @@ Starts an empty conversation titled "New conversation"; the first message sent i
 
 ### `GET /api/chat/sessions/:id`
 
-**200** `{ session, messages: ChatMessageDto[] }`. The newest 200 messages, oldest first.
-`ChatMessageDto`: `{ id, role, content, engine: "mistral"|"fallback"|"system"|null, action, suggestions?, createdAt }`. `action` and `suggestions` are stored with each assistant turn, so a reload restores the confirmation card and the suggested-time chips.
+**200** `{ session, messages: ChatMessageDto[], appointments: AppointmentDto[] }`. The newest 200 messages, oldest first.
+`ChatMessageDto`: `{ id, role, content, engine: "mistral"|"fallback"|"system"|null, action, suggestions?, draft?, appointmentId?, createdAt }`. `action`, `suggestions`, `draft` (the booking draft as it stood after that turn) and, on a `booked` turn, `appointmentId` are stored with each assistant turn, so a reload rebuilds every confirmation card, receipt and suggested-time chip from its own message. Messages stored before `draft`/`appointmentId` were recorded omit them.
+`appointments` are the conversation's bookings that are not cancelled (joined by `appointments.chat_session_id`, scoped to the caller's tenant and to the conversation's owner), oldest first, so a receipt shows the row as it is now however far off or long past it is.
 
 ### `POST /api/chat/messages` · chat tier
 
