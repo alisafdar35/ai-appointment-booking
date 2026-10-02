@@ -555,9 +555,10 @@ const clearsDay = (code: appointments.BookingFailure['code']): boolean => code =
 /**
  * Turn a free-text service name into a catalogue row.
  *
- * Three outcomes rather than a nullable return, because the caller must treat
- * "nothing matched" and "several matched" differently: one is a correction,
- * the other is a question. Collapsing them into null would lose that.
+ * Four outcomes rather than a nullable return, because the caller must treat
+ * "no name given", "nothing matched" and "several matched" differently: the
+ * first asks for a service, the second is a correction, the third a question.
+ * Collapsing them into null would lose that.
  */
 type ServiceResolution =
   | { kind: 'resolved'; service: ServiceDto }
