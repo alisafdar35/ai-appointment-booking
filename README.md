@@ -13,9 +13,9 @@ Slotly is a multi-tenant SaaS prototype. A customer types *"teeth whitening next
 | Web app | **https://ai-appointment-booking-psi.vercel.app** |
 | API health | **https://slotly-api-r5g6.onrender.com/health** (DB status, active AI provider, uptime; per-tenant AI usage is at the owner-only `GET /api/ai/summary`) |
 | Demo video | _coming soon_ |
+| Repository | https://github.com/alisafdar35/ai-appointment-booking |
 
 > The API runs on Render's free plan, which sleeps after 15 minutes idle: the first request after a pause can take ~30–60 s while it wakes. Everything is fast after that.
-| Repository | https://github.com/alisafdar35/ai-appointment-booking |
 
 **Demo logins** (password for all: `Password123!`)
 
